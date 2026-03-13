@@ -181,6 +181,35 @@ func FormatSize(size int64) string {
 	return fmt.Sprintf("%1.2fG", float64(size)/1024/1024/1024)
 }
 
+// FileRendererHook is called by FileSystem when a file or directory is opened.
+// It receives the request URL path and the open fs.File.
+//
+// Ownership rules:
+//   - If a non-nil Renderer is returned, ownership of the file transfers to
+//     the hook; FileSystem will not close it.
+//   - If nil, nil is returned, ownership remains with FileSystem, which will
+//     continue with its default handling. The hook MUST NOT have called Read
+//     or ReadDir on the file; Stat is safe.
+type FileRendererHook func(urlPath string, f fs.File) (Renderer, error)
+
+// FileSystemOption configures a FileSystem endpoint.
+type FileSystemOption func(*FileSystem)
+
+// WithFileRenderer returns a FileSystemOption that installs a hook called
+// after path normalisation but before default static file serving. Returning
+// nil, nil falls through to http.ServeContent.
+func WithFileRenderer(fn FileRendererHook) FileSystemOption {
+	return func(f *FileSystem) { f.fileRenderer = fn }
+}
+
+// WithDirRenderer returns a FileSystemOption that installs a hook called
+// after path normalisation but before any index-file lookup or directory
+// listing. Returning nil, nil falls through to the default directory handling
+// (IndexHTML, DirectoryListing, 404).
+func WithDirRenderer(fn FileRendererHook) FileSystemOption {
+	return func(f *FileSystem) { f.dirRenderer = fn }
+}
+
 // FileSystemParams are the decoded request params for FileSystem.
 //
 // Callers typically mount this using a mux wildcard like: "/blah/{path...}".
@@ -211,6 +240,9 @@ type FileSystem struct {
 	// DirectoryListing, if true, serves an HTML listing when a directory is
 	// requested and IndexHTML does not resolve.
 	DirectoryListing bool
+
+	fileRenderer FileRendererHook
+	dirRenderer  FileRendererHook
 }
 
 // Endpoint serves a file or directory from the configured FS.
@@ -277,6 +309,25 @@ func (f *FileSystem) Endpoint(w http.ResponseWriter, r *http.Request, params Fil
 			return &RedirectRenderer{URL: urlPath, Status: http.StatusMovedPermanently}, nil
 		}
 
+		// DirRenderer hook: called before index-file lookup or directory listing.
+		// The hook receives the open directory file; it MUST NOT call ReadDir
+		// if it returns nil, nil.
+		if f.dirRenderer != nil {
+			urlPath := ""
+			if r.URL != nil {
+				urlPath = r.URL.Path
+			}
+			renderer, err := f.dirRenderer(urlPath, file)
+			if err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			if renderer != nil {
+				// Ownership of file transferred to the hook/renderer.
+				return renderer, nil
+			}
+		}
+
 		// Optionally serve index.html for directories.
 		if f.IndexHTML {
 			indexPath := path.Join(p, "index.html")
@@ -306,6 +357,25 @@ func (f *FileSystem) Endpoint(w http.ResponseWriter, r *http.Request, params Fil
 
 		_ = file.Close()
 		return nil, Error(http.StatusNotFound, "not found", fs.ErrNotExist)
+	}
+
+	// FileRenderer hook: called before default static file serving.
+	// The hook receives the open file; it MUST NOT call Read if it returns nil, nil.
+	if f.fileRenderer != nil {
+		urlPath := ""
+		if r.URL != nil {
+			urlPath = r.URL.Path
+		}
+		renderer, err := f.fileRenderer(urlPath, file)
+		if err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if renderer != nil {
+			// Ownership of file transferred to the hook/renderer.
+			return renderer, nil
+		}
+		// nil, nil: fall through to default static file serving.
 	}
 
 	return &StaticFileRenderer{File: file}, nil

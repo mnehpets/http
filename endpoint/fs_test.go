@@ -372,6 +372,192 @@ func TestFileSystemEndpoint_DirectoryWithoutIndexOrListingIs404(t *testing.T) {
 	}
 }
 
+func TestFileSystemEndpoint_FileRendererHook_ReturnsRenderer(t *testing.T) {
+	called := false
+	hook := FileRendererHook(func(urlPath string, f fs.File) (Renderer, error) {
+		called = true
+		if urlPath != "/hello.txt" {
+			return nil, nil
+		}
+		_ = f // hook takes ownership
+		return &StringRenderer{Body: "hook rendered"}, nil
+	})
+
+	fs := &FileSystem{
+		FS: func(_ context.Context, _ *http.Request) (fs.FS, error) {
+			return fstest.MapFS{
+				"hello.txt": &fstest.MapFile{Data: []byte("static")},
+			}, nil
+		},
+	}
+	WithFileRenderer(hook)(fs)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/hello.txt", nil)
+
+	rndr, err := fs.Endpoint(rec, req, FileSystemParams{Path: "hello.txt"})
+	if err != nil {
+		t.Fatalf("Endpoint returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("expected hook to be called")
+	}
+	if err := rndr.Render(rec, req); err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	if got := rec.Body.String(); got != "hook rendered" {
+		t.Fatalf("expected body %q, got %q", "hook rendered", got)
+	}
+}
+
+func TestFileSystemEndpoint_FileRendererHook_NilFallsThrough(t *testing.T) {
+	hook := FileRendererHook(func(urlPath string, f fs.File) (Renderer, error) {
+		return nil, nil // not handled — fall through to default
+	})
+
+	fse := &FileSystem{
+		FS: func(_ context.Context, _ *http.Request) (fs.FS, error) {
+			return fstest.MapFS{
+				"static.css": &fstest.MapFile{Data: []byte("body{}")},
+			}, nil
+		},
+	}
+	WithFileRenderer(hook)(fse)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/static.css", nil)
+
+	rndr, err := fse.Endpoint(rec, req, FileSystemParams{Path: "static.css"})
+	if err != nil {
+		t.Fatalf("Endpoint returned error: %v", err)
+	}
+	if err := rndr.Render(rec, req); err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	if got := rec.Body.String(); got != "body{}" {
+		t.Fatalf("expected default static body %q, got %q", "body{}", got)
+	}
+}
+
+func TestFileSystemEndpoint_FileRendererHook_Omitted_DefaultBehaviour(t *testing.T) {
+	fse := &FileSystem{
+		FS: func(_ context.Context, _ *http.Request) (fs.FS, error) {
+			return fstest.MapFS{
+				"page.txt": &fstest.MapFile{Data: []byte("content")},
+			}, nil
+		},
+	}
+	// No WithFileRenderer applied.
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/page.txt", nil)
+
+	rndr, err := fse.Endpoint(rec, req, FileSystemParams{Path: "page.txt"})
+	if err != nil {
+		t.Fatalf("Endpoint returned error: %v", err)
+	}
+	if err := rndr.Render(rec, req); err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	if got := rec.Body.String(); got != "content" {
+		t.Fatalf("expected body %q, got %q", "content", got)
+	}
+}
+
+func TestFileSystemEndpoint_DirRendererHook_ReturnsRenderer(t *testing.T) {
+	called := false
+	hook := FileRendererHook(func(urlPath string, f fs.File) (Renderer, error) {
+		called = true
+		if urlPath != "/blog/" {
+			return nil, nil
+		}
+		return &StringRenderer{Body: "blog index"}, nil
+	})
+
+	fse := &FileSystem{
+		FS: func(_ context.Context, _ *http.Request) (fs.FS, error) {
+			return fstest.MapFS{
+				"blog/post.md": &fstest.MapFile{Data: []byte("post")},
+			}, nil
+		},
+	}
+	WithDirRenderer(hook)(fse)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/blog/", nil)
+
+	rndr, err := fse.Endpoint(rec, req, FileSystemParams{Path: "blog/"})
+	if err != nil {
+		t.Fatalf("Endpoint returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("expected DirFallback hook to be called")
+	}
+	if err := rndr.Render(rec, req); err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	if got := rec.Body.String(); got != "blog index" {
+		t.Fatalf("expected body %q, got %q", "blog index", got)
+	}
+}
+
+func TestFileSystemEndpoint_DirRendererHook_NilFallsThrough(t *testing.T) {
+	hook := FileRendererHook(func(urlPath string, f fs.File) (Renderer, error) {
+		return nil, nil // not handled
+	})
+
+	fse := &FileSystem{
+		FS: func(_ context.Context, _ *http.Request) (fs.FS, error) {
+			return fstest.MapFS{
+				"dir/a.txt": &fstest.MapFile{Data: []byte("A")},
+			}, nil
+		},
+		DirectoryListing: true,
+	}
+	WithDirRenderer(hook)(fse)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dir/", nil)
+
+	rndr, err := fse.Endpoint(rec, req, FileSystemParams{Path: "dir/"})
+	if err != nil {
+		t.Fatalf("Endpoint returned error: %v", err)
+	}
+	if err := rndr.Render(rec, req); err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	// Should fall through to directory listing.
+	if got := rec.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("expected directory listing Content-Type, got %q", got)
+	}
+}
+
+func TestFileSystemEndpoint_DirRendererHook_Omitted_DefaultBehaviour(t *testing.T) {
+	fse := &FileSystem{
+		FS: func(_ context.Context, _ *http.Request) (fs.FS, error) {
+			return fstest.MapFS{
+				"dir/a.txt": &fstest.MapFile{Data: []byte("A")},
+			}, nil
+		},
+		DirectoryListing: true,
+		// No WithDirRenderer applied.
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dir/", nil)
+
+	rndr, err := fse.Endpoint(rec, req, FileSystemParams{Path: "dir/"})
+	if err != nil {
+		t.Fatalf("Endpoint returned error: %v", err)
+	}
+	if err := rndr.Render(rec, req); err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("expected directory listing Content-Type, got %q", got)
+	}
+}
+
 func TestFileSystemEndpoint_PathTraversalIsNotFound(t *testing.T) {
 	f := &FileSystem{
 		FS: func(_ context.Context, _ *http.Request) (fs.FS, error) {
