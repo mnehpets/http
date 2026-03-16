@@ -1,6 +1,41 @@
 package endpoint
 
-import "net/http"
+import (
+	"io"
+	"net/http"
+)
+
+// WithCloser returns a Renderer that calls c.Close() after Render() completes,
+// whether or not Render returns an error. This is useful when a renderer is
+// built from a resource (e.g. a file) that the renderer itself has no reference
+// to, so the caller can attach the cleanup without wrapping the renderer type.
+//
+// The returned Renderer implements io.Closer; the endpoint handler will call
+// Close() automatically via the existing io.Closer check.
+//
+// Multiple resources can be attached by chaining:
+//
+//	endpoint.WithCloser(endpoint.WithCloser(r, f1), f2)
+func WithCloser(r Renderer, c io.Closer) Renderer {
+	return &withCloser{Renderer: r, closer: c}
+}
+
+type withCloser struct {
+	Renderer
+	closer io.Closer
+}
+
+func (wc *withCloser) Close() error {
+	err := wc.closer.Close()
+	// Propagate to the inner renderer so that chained WithCloser calls
+	// each have their closer invoked.
+	if c, ok := wc.Renderer.(io.Closer); ok {
+		if err2 := c.Close(); err == nil {
+			err = err2
+		}
+	}
+	return err
+}
 
 // StringRenderer is a renderer implementation that writes a string
 // as the response body with an optional status code and content type.

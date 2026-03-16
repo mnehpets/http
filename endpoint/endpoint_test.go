@@ -812,3 +812,60 @@ func TestRendererCleanup(t *testing.T) {
 		}
 	})
 }
+
+func TestWithCloser(t *testing.T) {
+	t.Run("closes after successful render", func(t *testing.T) {
+		var closed bool
+		closer := closerFunc(func() error { closed = true; return nil })
+		r := WithCloser(&StringRenderer{Body: "ok"}, closer)
+		h := HandleFunc(func(_ http.ResponseWriter, _ *http.Request, _ struct{}) (Renderer, error) {
+			return r, nil
+		})
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		h(rec, req)
+		if !closed {
+			t.Error("expected Close() to be called")
+		}
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected status 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("closes after render error", func(t *testing.T) {
+		var closed bool
+		closer := closerFunc(func() error { closed = true; return nil })
+		r := WithCloser(RendererFunc(func(w http.ResponseWriter, _ *http.Request) error {
+			return errors.New("render failed")
+		}), closer)
+		h := HandleFunc(func(_ http.ResponseWriter, _ *http.Request, _ struct{}) (Renderer, error) {
+			return r, nil
+		})
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		h(rec, req)
+		if !closed {
+			t.Error("expected Close() to be called even on render error")
+		}
+	})
+
+	t.Run("chained closers", func(t *testing.T) {
+		var closed1, closed2 bool
+		c1 := closerFunc(func() error { closed1 = true; return nil })
+		c2 := closerFunc(func() error { closed2 = true; return nil })
+		r := WithCloser(WithCloser(&StringRenderer{Body: "ok"}, c1), c2)
+		h := HandleFunc(func(_ http.ResponseWriter, _ *http.Request, _ struct{}) (Renderer, error) {
+			return r, nil
+		})
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		h(rec, req)
+		if !closed1 || !closed2 {
+			t.Errorf("expected both closers to be called, got closed1=%v closed2=%v", closed1, closed2)
+		}
+	})
+}
+
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
