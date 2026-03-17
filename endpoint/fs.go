@@ -210,6 +210,13 @@ func WithDirRenderer(fn FileRendererHook) FileSystemOption {
 	return func(f *FileSystem) { f.dirRenderer = fn }
 }
 
+// WithDirTemplate returns a FileSystemOption that sets a custom HTML template
+// for directory listings. The template receives a [DirectoryHTMLData] value.
+// If nil, the default template is used.
+func WithDirTemplate(t *htmltmpl.Template) FileSystemOption {
+	return func(f *FileSystem) { f.dirTemplate = t }
+}
+
 // FileSystemParams are the decoded request params for FileSystem.
 //
 // Callers typically mount this using a mux wildcard like: "/blah/{path...}".
@@ -243,6 +250,7 @@ type FileSystem struct {
 
 	fileRenderer FileRendererHook
 	dirRenderer  FileRendererHook
+	dirTemplate  *htmltmpl.Template
 }
 
 // Endpoint serves a file or directory from the configured FS.
@@ -351,7 +359,7 @@ func (f *FileSystem) Endpoint(w http.ResponseWriter, r *http.Request, params Fil
 				if dirPath == "." {
 					dirPath = ""
 				}
-				return &DirectoryHTMLRenderer{DirectoryHTMLData: DirectoryHTMLData{Path: dirPath, Entries: entries}}, nil
+				return &DirectoryHTMLRenderer{DirectoryHTMLData: DirectoryHTMLData{Path: dirPath, Entries: entries}, Template: f.dirTemplate}, nil
 			}
 		}
 
