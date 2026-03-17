@@ -16,8 +16,8 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
-	"github.com/mnehpets/oneserve/endpoint"
-	"github.com/mnehpets/oneserve/middleware"
+	"github.com/mnehpets/http/endpoint"
+	"github.com/mnehpets/http/middleware"
 	"golang.org/x/oauth2"
 )
 

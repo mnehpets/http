@@ -5,8 +5,8 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/mnehpets/oneserve/endpoint"
-	"github.com/mnehpets/oneserve/jsonrpc"
+	"github.com/mnehpets/http/endpoint"
+	"github.com/mnehpets/http/jsonrpc"
 )
 
 type MathMethods struct{}

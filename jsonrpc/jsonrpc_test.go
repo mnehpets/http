@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mnehpets/oneserve/endpoint"
+	"github.com/mnehpets/http/endpoint"
 )
 
 func serveRPC(e *JSONRPCEndpoint, processors ...endpoint.Processor) http.Handler {

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/mnehpets/oneserve/endpoint"
+	"github.com/mnehpets/http/endpoint"
 )
 
 func main() {

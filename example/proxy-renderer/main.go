@@ -4,7 +4,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/mnehpets/oneserve/endpoint"
+	"github.com/mnehpets/http/endpoint"
 )
 
 func main() {

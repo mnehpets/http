@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/mnehpets/oneserve/endpoint"
-	"github.com/mnehpets/oneserve/middleware"
+	"github.com/mnehpets/http/endpoint"
+	"github.com/mnehpets/http/middleware"
 	"golang.org/x/oauth2"
 )
 

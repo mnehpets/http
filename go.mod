@@ -1,4 +1,4 @@
-module github.com/mnehpets/oneserve
+module github.com/mnehpets/http
 
 go 1.25.5
 

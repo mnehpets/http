@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/mnehpets/oneserve/endpoint"
+	"github.com/mnehpets/http/endpoint"
 )
 
 const (

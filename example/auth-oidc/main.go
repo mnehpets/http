@@ -12,9 +12,9 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/joho/godotenv"
-	"github.com/mnehpets/oneserve/auth"
-	"github.com/mnehpets/oneserve/endpoint"
-	"github.com/mnehpets/oneserve/middleware"
+	"github.com/mnehpets/http/auth"
+	"github.com/mnehpets/http/endpoint"
+	"github.com/mnehpets/http/middleware"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/endpoints"
 )

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/mnehpets/oneserve/endpoint"
-	"github.com/mnehpets/oneserve/middleware"
+	"github.com/mnehpets/http/endpoint"
+	"github.com/mnehpets/http/middleware"
 )
 
 var (

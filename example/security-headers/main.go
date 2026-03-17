@@ -4,8 +4,8 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/mnehpets/oneserve/endpoint"
-	"github.com/mnehpets/oneserve/middleware"
+	"github.com/mnehpets/http/endpoint"
+	"github.com/mnehpets/http/middleware"
 )
 
 // PublicAPIEndpoint is a simple API endpoint that returns JSON.

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/mnehpets/oneserve/endpoint"
+	"github.com/mnehpets/http/endpoint"
 )
 
 type EmptyParams struct{}
