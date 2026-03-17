@@ -136,31 +136,31 @@ html { font-family: monospace; }
 		<table>
 			<thead>
 				<tr>
-					<th>Modified</th>
-					<th>Size</th>
 					<th>Name</th>
+					<th>Size</th>
+					<th>Modified</th>
 				</tr>
 			</thead>
 			<tbody>
 {{- range .Entries }}
 				{{- $fi := .Info }}
 				<tr>
-					{{- if $fi }}
-					<td>{{ $fi.ModTime.Format "2006-01-02 15:04" }}</td>
-					{{- else }}
-					<td></td>
-					{{- end }}
 {{- if .IsDir }}
-					<td>[DIR]</td>
 					<td><a href="{{ .Name }}/">{{ .Name }}/</a></td>
+					<td>[DIR]</td>
 {{- else }}
+					<td><a href="{{ .Name }}">{{ .Name }}</a></td>
 					{{- if $fi }}
 					<td>{{ formatSize $fi.Size }}</td>
 					{{- else }}
 					<td></td>
 					{{- end }}
-					<td><a href="{{ .Name }}">{{ .Name }}</a></td>
 {{- end }}
+					{{- if $fi }}
+					<td>{{ $fi.ModTime.Format "2006-01-02 15:04" }}</td>
+					{{- else }}
+					<td></td>
+					{{- end }}
 				</tr>
 {{- end }}
 			</tbody>
