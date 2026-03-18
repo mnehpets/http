@@ -390,7 +390,7 @@ func TestFileSystemEndpoint_FileRendererHook_ReturnsRenderer(t *testing.T) {
 			}, nil
 		},
 	}
-	WithFileRenderer(hook)(fs)
+	fs.FileRenderer = hook
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/hello.txt", nil)
@@ -422,7 +422,7 @@ func TestFileSystemEndpoint_FileRendererHook_NilFallsThrough(t *testing.T) {
 			}, nil
 		},
 	}
-	WithFileRenderer(hook)(fse)
+	fse.FileRenderer = hook
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/static.css", nil)
@@ -447,7 +447,7 @@ func TestFileSystemEndpoint_FileRendererHook_Omitted_DefaultBehaviour(t *testing
 			}, nil
 		},
 	}
-	// No WithFileRenderer applied.
+	// No FileRenderer set.
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/page.txt", nil)
@@ -481,7 +481,7 @@ func TestFileSystemEndpoint_DirRendererHook_ReturnsRenderer(t *testing.T) {
 			}, nil
 		},
 	}
-	WithDirRenderer(hook)(fse)
+	fse.DirRenderer = hook
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/blog/", nil)
@@ -514,7 +514,7 @@ func TestFileSystemEndpoint_DirRendererHook_NilFallsThrough(t *testing.T) {
 		},
 		DirectoryListing: true,
 	}
-	WithDirRenderer(hook)(fse)
+	fse.DirRenderer = hook
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/dir/", nil)
@@ -540,7 +540,7 @@ func TestFileSystemEndpoint_DirRendererHook_Omitted_DefaultBehaviour(t *testing.
 			}, nil
 		},
 		DirectoryListing: true,
-		// No WithDirRenderer applied.
+		// No DirRenderer set.
 	}
 
 	rec := httptest.NewRecorder()

@@ -192,31 +192,6 @@ func FormatSize(size int64) string {
 //     or ReadDir on the file; Stat is safe.
 type FileRendererHook func(urlPath string, f fs.File) (Renderer, error)
 
-// FileSystemOption configures a FileSystem endpoint.
-type FileSystemOption func(*FileSystem)
-
-// WithFileRenderer returns a FileSystemOption that installs a hook called
-// after path normalisation but before default static file serving. Returning
-// nil, nil falls through to http.ServeContent.
-func WithFileRenderer(fn FileRendererHook) FileSystemOption {
-	return func(f *FileSystem) { f.fileRenderer = fn }
-}
-
-// WithDirRenderer returns a FileSystemOption that installs a hook called
-// after path normalisation but before any index-file lookup or directory
-// listing. Returning nil, nil falls through to the default directory handling
-// (IndexHTML, DirectoryListing, 404).
-func WithDirRenderer(fn FileRendererHook) FileSystemOption {
-	return func(f *FileSystem) { f.dirRenderer = fn }
-}
-
-// WithDirTemplate returns a FileSystemOption that sets a custom HTML template
-// for directory listings. The template receives a [DirectoryHTMLData] value.
-// If nil, the default template is used.
-func WithDirTemplate(t *htmltmpl.Template) FileSystemOption {
-	return func(f *FileSystem) { f.dirTemplate = t }
-}
-
 // FileSystemParams are the decoded request params for FileSystem.
 //
 // Callers typically mount this using a mux wildcard like: "/blah/{path...}".
@@ -248,9 +223,20 @@ type FileSystem struct {
 	// requested and IndexHTML does not resolve.
 	DirectoryListing bool
 
-	fileRenderer FileRendererHook
-	dirRenderer  FileRendererHook
-	dirTemplate  *htmltmpl.Template
+	// FileRenderer, if set, is called after path normalisation but before
+	// default static file serving. Returning nil, nil falls through to
+	// http.ServeContent.
+	FileRenderer FileRendererHook
+
+	// DirRenderer, if set, is called after path normalisation but before any
+	// index-file lookup or directory listing. Returning nil, nil falls through
+	// to the default directory handling (IndexHTML, DirectoryListing, 404).
+	DirRenderer FileRendererHook
+
+	// DirTemplate, if set, is used to render directory listings. If nil, a
+	// minimal default template is used. For a styled template with sortable
+	// columns and breadcrumb navigation, use [FancyDirTemplate].
+	DirTemplate *htmltmpl.Template
 }
 
 // Endpoint serves a file or directory from the configured FS.
@@ -320,12 +306,12 @@ func (f *FileSystem) Endpoint(w http.ResponseWriter, r *http.Request, params Fil
 		// DirRenderer hook: called before index-file lookup or directory listing.
 		// The hook receives the open directory file; it MUST NOT call ReadDir
 		// if it returns nil, nil.
-		if f.dirRenderer != nil {
+		if f.DirRenderer != nil {
 			urlPath := ""
 			if r.URL != nil {
 				urlPath = r.URL.Path
 			}
-			renderer, err := f.dirRenderer(urlPath, file)
+			renderer, err := f.DirRenderer(urlPath, file)
 			if err != nil {
 				_ = file.Close()
 				return nil, err
@@ -359,7 +345,7 @@ func (f *FileSystem) Endpoint(w http.ResponseWriter, r *http.Request, params Fil
 				if dirPath == "." {
 					dirPath = ""
 				}
-				return &DirectoryHTMLRenderer{DirectoryHTMLData: DirectoryHTMLData{Path: dirPath, Entries: entries}, Template: f.dirTemplate}, nil
+				return &DirectoryHTMLRenderer{DirectoryHTMLData: DirectoryHTMLData{Path: dirPath, Entries: entries}, Template: f.DirTemplate}, nil
 			}
 		}
 
@@ -369,12 +355,12 @@ func (f *FileSystem) Endpoint(w http.ResponseWriter, r *http.Request, params Fil
 
 	// FileRenderer hook: called before default static file serving.
 	// The hook receives the open file; it MUST NOT call Read if it returns nil, nil.
-	if f.fileRenderer != nil {
+	if f.FileRenderer != nil {
 		urlPath := ""
 		if r.URL != nil {
 			urlPath = r.URL.Path
 		}
-		renderer, err := f.fileRenderer(urlPath, file)
+		renderer, err := f.FileRenderer(urlPath, file)
 		if err != nil {
 			_ = file.Close()
 			return nil, err
