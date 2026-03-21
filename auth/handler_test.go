@@ -131,20 +131,34 @@ func TestAuthHandler_OpenRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Attempt open redirect
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/auth/login/test?next_url=//evil.com", nil)
-	h.ServeHTTP(w, r)
+	cases := []struct {
+		name    string
+		nextURL string
+	}{
+		{"protocol-relative", "//evil.com"},
+		{"absolute http", "http://evil.com"},
+		{"absolute https", "https://evil.com"},
+		{"scheme attack", "javascript:alert(1)"},
+		{"backslash", "/\\evil.com"},
+		{"empty", ""},
+		{"no leading slash", "evil.com"},
+	}
 
-	// Check cookie state
-	c := w.Result().Cookies()[0]
-	var states AuthStateMap
-	_ = cookie.Decode(c, &states)
-	// Iterate to find the single state
-	for _, s := range states {
-		if s.AuthParams.NextURL != "/" {
-			t.Errorf("expected NextURL to be '/', got %q", s.AuthParams.NextURL)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", "/auth/login/test?next_url="+url.QueryEscape(tc.nextURL), nil)
+			h.ServeHTTP(w, r)
+
+			c := w.Result().Cookies()[0]
+			var states AuthStateMap
+			_ = cookie.Decode(c, &states)
+			for _, s := range states {
+				if s.AuthParams.NextURL != "/" {
+					t.Errorf("next_url %q: expected NextURL sanitized to '/', got %q", tc.nextURL, s.AuthParams.NextURL)
+				}
+			}
+		})
 	}
 }
 
@@ -246,7 +260,7 @@ func TestAuthHandler_StateEviction(t *testing.T) {
 	var cookies []*http.Cookie
 	lastCookie := &http.Cookie{}
 
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/auth/login/test", nil)
 		if i > 0 {
@@ -303,7 +317,7 @@ func TestAuthHandler_OIDCNonceMismatch(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		issuer := oidcServer.URL
 		if r.URL.Path == "/.well-known/openid-configuration" {
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			json.NewEncoder(w).Encode(map[string]any{
 				"issuer":                                issuer,
 				"jwks_uri":                              issuer + "/keys",
 				"authorization_endpoint":                issuer + "/auth",
@@ -331,7 +345,7 @@ func TestAuthHandler_OIDCNonceMismatch(t *testing.T) {
 				NotBefore: jwt.NewNumericDate(time.Now()),
 			}
 			// Add nonce
-			rawJWT, _ := jwt.Signed(signer).Claims(claims).Claims(map[string]interface{}{"nonce": "WRONG_NONCE"}).Serialize()
+			rawJWT, _ := jwt.Signed(signer).Claims(claims).Claims(map[string]any{"nonce": "WRONG_NONCE"}).Serialize()
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{
@@ -390,7 +404,7 @@ func TestAuthHandler_PreAuthFailure(t *testing.T) {
 	reg.RegisterOAuth2Provider("test", &oauth2.Config{})
 
 	// Pre-auth hook that fails
-	failPreAuth := func(ctx context.Context, w http.ResponseWriter, r *http.Request, pid string, params AuthParams) (AuthParams, error) {
+	failPreAuth := func(ctx context.Context, w http.ResponseWriter, r *http.Request, params AuthParams) (AuthParams, error) {
 		return params, endpoint.Error(http.StatusForbidden, "blocked by pre-auth", nil)
 	}
 
@@ -640,6 +654,372 @@ func TestAuthHandler_PKCE_Disabled(t *testing.T) {
 	loc := w.Result().Header.Get("Location")
 	if strings.Contains(loc, "code_challenge") {
 		t.Error("expected no code_challenge when PKCE is disabled")
+	}
+}
+
+// TestAuthHandler_Login_StateKey_SkipsPreAuthHook verifies that when a valid state_key is
+// provided to the login endpoint, the preAuthHook is not invoked (case 1). The params were
+// already validated when the state was saved; running the hook again on the same request
+// would be incorrect and could break flows where the hook uses request-scoped context.
+func TestAuthHandler_Login_StateKey_SkipsPreAuthHook(t *testing.T) {
+	keys := map[string][]byte{"1": make([]byte, 32)}
+	cookie, _ := middleware.NewSecureCookie("auth-state", "1", keys)
+	reg := NewRegistry()
+	reg.RegisterOAuth2Provider("test", &oauth2.Config{Endpoint: oauth2.Endpoint{AuthURL: "http://provider/auth"}})
+
+	// A hook that always fails — if the login handler calls it, the request will fail.
+	failHook := func(ctx context.Context, w http.ResponseWriter, r *http.Request, params AuthParams) (AuthParams, error) {
+		return params, errors.New("preAuthHook must not be called for a pre-saved state")
+	}
+	h, err := NewHandler(reg, "auth-state", "1", keys, "http://example.com", "/auth", WithPreAuthHook(failHook))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject a pre-saved state directly into the cookie, bypassing PrepareAuth (which would
+	// also invoke the hook). This simulates a state that was already validated and stored.
+	stateKey := "pre-saved-key"
+	c, _ := cookie.Encode(AuthStateMap{stateKey: AuthState{
+		AuthParams: AuthParams{NextURL: "/protected"},
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}}, 3600)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/auth/login/test?state_key="+stateKey, nil)
+	r.AddCookie(c)
+	h.ServeHTTP(w, r)
+
+	if w.Result().StatusCode != http.StatusFound {
+		t.Errorf("expected 302 (preAuthHook should not have been called), got %d: %s",
+			w.Result().StatusCode, w.Body.String())
+	}
+}
+
+// TestAuthHandler_Callback_StateReplay verifies that a state is consumed after a successful
+// callback. A second callback using the updated response cookie (with the state removed)
+// must fail, preventing replay attacks.
+func TestAuthHandler_Callback_StateReplay(t *testing.T) {
+	keys := map[string][]byte{"1": make([]byte, 32)}
+	cookie, _ := middleware.NewSecureCookie("auth-state", "1", keys)
+	reg := NewRegistry()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"access_token": "tok", "token_type": "Bearer"}`))
+		}
+	}))
+	defer srv.Close()
+
+	reg.RegisterOAuth2Provider("test", &oauth2.Config{
+		Endpoint: oauth2.Endpoint{TokenURL: srv.URL + "/token"},
+	})
+	h, err := NewHandler(reg, "auth-state", "1", keys, "http://example.com", "/auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stateKey := "state123"
+	c, _ := cookie.Encode(AuthStateMap{stateKey: AuthState{
+		AuthParams: AuthParams{NextURL: "/"},
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}}, 3600)
+
+	// First callback — succeeds and consumes the state.
+	w1 := httptest.NewRecorder()
+	r1 := httptest.NewRequest("GET", "/auth/callback/test?code=foo&state="+stateKey, nil)
+	r1.AddCookie(c)
+	h.ServeHTTP(w1, r1)
+
+	if w1.Result().StatusCode != http.StatusFound {
+		t.Fatalf("first callback: expected 302, got %d", w1.Result().StatusCode)
+	}
+
+	// Second callback: simulate browser behaviour — forward the response cookies from the
+	// first callback (which have the state removed or the cookie cleared entirely).
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("GET", "/auth/callback/test?code=foo&state="+stateKey, nil)
+	for _, rc := range w1.Result().Cookies() {
+		if rc.MaxAge >= 0 { // skip "delete" cookies (MaxAge == -1)
+			r2.AddCookie(rc)
+		}
+	}
+	h.ServeHTTP(w2, r2)
+
+	if w2.Result().StatusCode != http.StatusBadRequest {
+		t.Errorf("replay: expected 400, got %d", w2.Result().StatusCode)
+	}
+}
+
+// TestAuthHandler_OIDC_Success verifies the happy path for an OIDC provider:
+// login generates a nonce, the provider returns a token with the matching nonce,
+// and the callback succeeds with a populated IDToken in the result.
+func TestAuthHandler_OIDC_Success(t *testing.T) {
+	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	signer, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: privKey}, (&jose.SignerOptions{}).WithType("JWT"))
+
+	// nonce is populated after the login step so the mock token endpoint can use it.
+	var nonce string
+
+	var oidcServer *httptest.Server
+	oidcServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		issuer := oidcServer.URL
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			json.NewEncoder(w).Encode(map[string]any{
+				"issuer":                                issuer,
+				"jwks_uri":                              issuer + "/keys",
+				"authorization_endpoint":                issuer + "/auth",
+				"token_endpoint":                        issuer + "/token",
+				"response_types_supported":              []string{"code"},
+				"subject_types_supported":               []string{"public"},
+				"id_token_signing_alg_values_supported": []string{"RS256"},
+			})
+		case "/keys":
+			jwks := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+				{Key: &privKey.PublicKey, Use: "sig", Algorithm: "RS256", KeyID: "test-key"},
+			}}
+			json.NewEncoder(w).Encode(jwks)
+		case "/token":
+			claims := jwt.Claims{
+				Subject:   "user123",
+				Issuer:    issuer,
+				Audience:  jwt.Audience{"client-id"},
+				Expiry:    jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				IssuedAt:  jwt.NewNumericDate(time.Now()),
+				NotBefore: jwt.NewNumericDate(time.Now()),
+			}
+			rawJWT, _ := jwt.Signed(signer).Claims(claims).Claims(map[string]any{"nonce": nonce}).Serialize()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"access_token": "tok",
+				"id_token":     rawJWT,
+				"token_type":   "Bearer",
+			})
+		}
+	}))
+	defer oidcServer.Close()
+
+	ctx := context.Background()
+	keys := map[string][]byte{"1": make([]byte, 32)}
+	cookie, _ := middleware.NewSecureCookie("auth-state", "1", keys)
+	reg := NewRegistry()
+	if err := reg.RegisterOIDCProvider(ctx, "oidc", oidcServer.URL, "client-id", "secret", []string{"openid"}, "http://example.com/callback"); err != nil {
+		t.Fatalf("failed to register OIDC provider: %v", err)
+	}
+
+	var capturedResult *AuthResult
+	h, err := NewHandler(reg, "auth-state", "1", keys, "http://example.com", "/auth",
+		WithResultEndpoint(func(w http.ResponseWriter, r *http.Request, result *AuthResult) (endpoint.Renderer, error) {
+			capturedResult = result
+			return &endpoint.RedirectRenderer{URL: "/", Status: http.StatusFound}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Login — generates and stores the nonce.
+	w1 := httptest.NewRecorder()
+	r1 := httptest.NewRequest("GET", "/auth/login/oidc", nil)
+	h.ServeHTTP(w1, r1)
+
+	if w1.Result().StatusCode != http.StatusFound {
+		t.Fatalf("login: expected 302, got %d", w1.Result().StatusCode)
+	}
+
+	// Decode the state cookie to extract the nonce so the mock token endpoint can use it.
+	loginCookie := w1.Result().Cookies()[0]
+	var states AuthStateMap
+	if err := cookie.Decode(loginCookie, &states); err != nil {
+		t.Fatal(err)
+	}
+	loc := w1.Result().Header.Get("Location")
+	stateKey, _ := url.Parse(loc)
+	for k, s := range states {
+		if k == stateKey.Query().Get("state") {
+			nonce = s.Nonce
+		}
+	}
+	if nonce == "" {
+		t.Fatal("nonce not found in state cookie")
+	}
+
+	// Callback with a token whose nonce matches.
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("GET", "/auth/callback/oidc?code=foo&state="+stateKey.Query().Get("state"), nil)
+	r2.AddCookie(loginCookie)
+	h.ServeHTTP(w2, r2)
+
+	if w2.Result().StatusCode != http.StatusFound {
+		t.Fatalf("callback: expected 302, got %d: %s", w2.Result().StatusCode, w2.Body.String())
+	}
+	if capturedResult == nil {
+		t.Fatal("result endpoint not called")
+	}
+	if capturedResult.Error != nil {
+		t.Fatalf("unexpected error: %v", capturedResult.Error)
+	}
+	if capturedResult.IDToken == nil {
+		t.Error("expected IDToken in result")
+	}
+	if capturedResult.IDToken.Subject != "user123" {
+		t.Errorf("expected subject user123, got %q", capturedResult.IDToken.Subject)
+	}
+}
+
+// TestAuthHandler_PrepareAuth verifies the full PrepareAuth flow:
+// PrepareAuth saves AuthParams → login endpoint loads them via state_key →
+// callback receives the original AuthParams in the result.
+func TestAuthHandler_PrepareAuth(t *testing.T) {
+	keys := map[string][]byte{"1": make([]byte, 32)}
+	reg := NewRegistry()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"access_token": "tok", "token_type": "Bearer"}`))
+		}
+	}))
+	defer srv.Close()
+
+	reg.RegisterOAuth2Provider("test", &oauth2.Config{
+		Endpoint: oauth2.Endpoint{AuthURL: srv.URL + "/auth", TokenURL: srv.URL + "/token"},
+	})
+
+	var capturedResult *AuthResult
+	h, err := NewHandler(reg, "auth-state", "1", keys, "http://example.com", "/auth",
+		WithResultEndpoint(func(w http.ResponseWriter, r *http.Request, result *AuthResult) (endpoint.Renderer, error) {
+			capturedResult = result
+			return &endpoint.RedirectRenderer{URL: "/"}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Protected route calls PrepareAuth and redirects to login.
+	w1 := httptest.NewRecorder()
+	r1 := httptest.NewRequest("GET", "/protected", nil)
+	stateKey, err := h.PrepareAuth(w1, r1, AuthParams{NextURL: "/protected", AppData: []byte("ctx")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stateKey == "" {
+		t.Fatal("expected non-empty stateKey")
+	}
+
+	// 2. Login endpoint loads the pre-saved state via state_key.
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("GET", "/auth/login/test?state_key="+stateKey, nil)
+	r2.AddCookie(w1.Result().Cookies()[0])
+	h.ServeHTTP(w2, r2)
+
+	if w2.Result().StatusCode != http.StatusFound {
+		t.Fatalf("login: expected 302, got %d: %s", w2.Result().StatusCode, w2.Body.String())
+	}
+	loc := w2.Result().Header.Get("Location")
+	if !strings.Contains(loc, srv.URL+"/auth") {
+		t.Errorf("expected redirect to provider auth endpoint, got %s", loc)
+	}
+	u, _ := url.Parse(loc)
+	state := u.Query().Get("state")
+
+	// 3. OAuth callback — cookie from the login response contains the enriched state.
+	w3 := httptest.NewRecorder()
+	r3 := httptest.NewRequest("GET", "/auth/callback/test?code=foo&state="+state, nil)
+	r3.AddCookie(w2.Result().Cookies()[0])
+	h.ServeHTTP(w3, r3)
+
+	if capturedResult == nil {
+		t.Fatal("result endpoint not called")
+	}
+	if capturedResult.Error != nil {
+		t.Fatalf("unexpected error in result: %v", capturedResult.Error)
+	}
+	if capturedResult.AuthParams.NextURL != "/protected" {
+		t.Errorf("expected NextURL /protected, got %q", capturedResult.AuthParams.NextURL)
+	}
+	if string(capturedResult.AuthParams.AppData) != "ctx" {
+		t.Errorf("expected AppData %q, got %q", "ctx", capturedResult.AuthParams.AppData)
+	}
+}
+
+// TestAuthHandler_PrepareAuth_SkipsPreAuthHook verifies that PrepareAuth does NOT invoke
+// the preAuthHook. On the PrepareAuth path, the caller constructs AuthParams in server-side
+// code and is solely responsible for validation. The hook is intentionally bypassed so that
+// hook logic written for the query-string path does not interfere.
+func TestAuthHandler_PrepareAuth_SkipsPreAuthHook(t *testing.T) {
+	keys := map[string][]byte{"1": make([]byte, 32)}
+	cookie, _ := middleware.NewSecureCookie("auth-state", "1", keys)
+	reg := NewRegistry()
+	reg.RegisterOAuth2Provider("test", &oauth2.Config{})
+
+	// A hook that fails unconditionally — if PrepareAuth calls it, the call will fail.
+	failHook := func(ctx context.Context, w http.ResponseWriter, r *http.Request, params AuthParams) (AuthParams, error) {
+		return params, errors.New("preAuthHook must not be called from PrepareAuth")
+	}
+	h, err := NewHandler(reg, "auth-state", "1", keys, "http://example.com", "/auth", WithPreAuthHook(failHook))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// PrepareAuth with params already validated by the caller.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	stateKey, err := h.PrepareAuth(w, r, AuthParams{NextURL: "/dashboard"})
+	if err != nil {
+		t.Fatalf("PrepareAuth should not invoke the preAuthHook, got error: %v", err)
+	}
+
+	// Params are stored as-is — no hook transformation.
+	c := w.Result().Cookies()[0]
+	var states AuthStateMap
+	if err := cookie.Decode(c, &states); err != nil {
+		t.Fatal(err)
+	}
+	s, ok := states[stateKey]
+	if !ok {
+		t.Fatal("state not found in cookie")
+	}
+	if s.AuthParams.NextURL != "/dashboard" {
+		t.Errorf("expected NextURL '/dashboard' (unmodified), got %q", s.AuthParams.NextURL)
+	}
+}
+
+// TestAuthHandler_Login_InvalidStateKey verifies that an unrecognised state_key falls
+// back gracefully (case 2): the login still proceeds with empty AuthParams rather than
+// returning an error, so a stale or replayed state_key cannot block authentication.
+func TestAuthHandler_Login_InvalidStateKey(t *testing.T) {
+	keys := map[string][]byte{"1": make([]byte, 32)}
+	cookie, _ := middleware.NewSecureCookie("auth-state", "1", keys)
+	reg := NewRegistry()
+	reg.RegisterOAuth2Provider("test", &oauth2.Config{Endpoint: oauth2.Endpoint{AuthURL: "http://provider/auth"}})
+
+	h, err := NewHandler(reg, "auth-state", "1", keys, "http://example.com", "/auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/auth/login/test?state_key=doesnotexist", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Result().StatusCode != http.StatusFound {
+		t.Fatalf("expected 302 fallback redirect, got %d", w.Result().StatusCode)
+	}
+
+	// The new state should have no AppData — no state from the bogus state_key leaked through.
+	// NextURL will be "/" because the defaultPreAuthHook normalises an empty URL to "/".
+	c := w.Result().Cookies()[0]
+	var states AuthStateMap
+	if err := cookie.Decode(c, &states); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range states {
+		if len(s.AuthParams.AppData) != 0 {
+			t.Errorf("expected no AppData in fallback state, got %q", s.AuthParams.AppData)
+		}
 	}
 }
 

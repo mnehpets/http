@@ -17,8 +17,18 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// PreAuthHook is an optional hook invoked before the flow starts.
-type PreAuthHook func(ctx context.Context, w http.ResponseWriter, r *http.Request, providerID string, params AuthParams) (AuthParams, error)
+// PreAuthHook is an optional hook invoked on the query-string login path only
+// (i.e. GET /auth/login/{provider}?next_url=...&app_data=...). It receives the
+// user-supplied AuthParams and returns a (possibly modified) copy.
+//
+// Use it to validate or re-encode params that arrive as raw query parameters —
+// for example, to enforce that NextURL is a local path, or to decrypt an
+// encrypted AppData payload.
+//
+// The hook is NOT called on the PrepareAuth path. When using PrepareAuth, the
+// caller constructs AuthParams directly in server-side code and is responsible
+// for ensuring they are valid and safe before passing them in.
+type PreAuthHook func(ctx context.Context, w http.ResponseWriter, r *http.Request, params AuthParams) (AuthParams, error)
 
 // maxAppDataBytes is the maximum allowed size of AppData after base64url decoding.
 const maxAppDataBytes = 512
@@ -61,7 +71,7 @@ type ResultEndpoint endpoint.EndpointFunc[*AuthResult]
 
 // defaultPreAuthHook is the default implementation.
 // It ensures the NextURL is a safe relative path to prevent open redirects.
-func defaultPreAuthHook(ctx context.Context, w http.ResponseWriter, r *http.Request, providerID string, params AuthParams) (AuthParams, error) {
+func defaultPreAuthHook(ctx context.Context, w http.ResponseWriter, r *http.Request, params AuthParams) (AuthParams, error) {
 	params.NextURL = ValidateNextURLIsLocal(params.NextURL)
 	return params, nil
 }
@@ -161,6 +171,18 @@ func NewHandler(registry *Registry, cookieName, keyID string, keys map[string][]
 	}
 
 	// Endpoint for /prefix/login/{provider}
+	//
+	// Three cases are handled, in order of precedence:
+	//
+	//  1. state_key present and valid: AuthParams were saved by PrepareAuth (which ran the
+	//     preAuthHook) and are loaded from the secure cookie. The preAuthHook is not
+	//     invoked again.
+	//
+	//  2. state_key present but invalid/expired: falls back to case 3 with empty AuthParams.
+	//     A stale or replayed state_key cannot prevent the user from authenticating.
+	//
+	//  3. No state_key: AuthParams are read from the query string (next_url, app_data) and
+	//     passed through the preAuthHook for validation.
 	h.mux.HandleFunc("GET "+path.Join(basePath, "login", "{provider}"), endpoint.HandleFunc(func(w http.ResponseWriter, r *http.Request, params LoginParams) (endpoint.Renderer, error) {
 		ctx := r.Context()
 		providerID := params.ProviderID
@@ -170,95 +192,64 @@ func NewHandler(registry *Registry, cookieName, keyID string, keys map[string][]
 			return nil, endpoint.Error(http.StatusNotFound, "provider not found", nil)
 		}
 
-		// 1. PreAuth Hook
-		var err error
-		// preAuth sanitizes and returns updated AuthParams
-		params.AuthParams, err = h.preAuth(ctx, w, r, providerID, params.AuthParams)
-		if err != nil {
-			return h.result(w, r, &AuthResult{
-				ProviderID: providerID,
-				AuthParams: &params.AuthParams,
-				Error:      endpoint.Error(http.StatusBadRequest, "pre-auth failed", err),
-			})
-		}
+		var stateKey string
+		var authState AuthState
 
-		// Check AppData length (decoded)
-		if len(params.AuthParams.AppData) > maxAppDataBytes {
-			return h.result(w, r, &AuthResult{
-				ProviderID: providerID,
-				AuthParams: &params.AuthParams,
-				Error:      endpoint.Error(http.StatusBadRequest, fmt.Sprintf("app_data exceeds maximum length of %d bytes", maxAppDataBytes), nil),
-			})
-		}
-
-		// 2. Prepare State
-		state, err := generateState()
-		if err != nil {
-			return h.result(w, r, &AuthResult{
-				ProviderID: providerID,
-				AuthParams: &params.AuthParams,
-				Error:      endpoint.Error(http.StatusInternalServerError, "failed to generate state", err),
-			})
-		}
-
-		authState := AuthState{
-			AuthParams: params.AuthParams,
-		}
-
-		// 3. PKCE
-		var codeChallenge string
-		if p.usePKCE {
-			verifier, challenge, err := generatePKCE()
+		if params.StateKey != "" {
+			// Cases 1 & 2: state_key provided.
+			savedState, err := h.getState(r, params.StateKey)
+			if err == nil {
+				// Case 1: valid pre-saved state from PrepareAuth.
+				stateKey = params.StateKey
+				authState = savedState
+			} else {
+				// Case 2: invalid or expired state_key — fall back to empty params.
+				authState.AuthParams, err = h.preAuth(ctx, w, r, AuthParams{})
+				if err != nil {
+					return h.result(w, r, &AuthResult{
+						ProviderID: providerID,
+						AuthParams: &authState.AuthParams,
+						Error:      endpoint.Error(http.StatusBadRequest, "pre-auth failed", err),
+					})
+				}
+				stateKey, err = generateRandomToken()
+				if err != nil {
+					return h.result(w, r, &AuthResult{
+						ProviderID: providerID,
+						AuthParams: &authState.AuthParams,
+						Error:      endpoint.Error(http.StatusInternalServerError, "failed to generate state", err),
+					})
+				}
+			}
+		} else {
+			// Case 3: no state_key — read AuthParams from query string, run preAuthHook.
+			var err error
+			authState.AuthParams, err = h.preAuth(ctx, w, r, params.AuthParams)
 			if err != nil {
 				return h.result(w, r, &AuthResult{
 					ProviderID: providerID,
-					AuthParams: &params.AuthParams,
-					Error:      endpoint.Error(http.StatusInternalServerError, "failed to generate PKCE", err),
+					AuthParams: &authState.AuthParams,
+					Error:      endpoint.Error(http.StatusBadRequest, "pre-auth failed", err),
 				})
 			}
-			authState.PKCEVerifier = verifier
-			codeChallenge = challenge
-		}
-
-		// 4. OIDC Nonce
-		var nonce string
-		if p.oidcProvider != nil {
-			nonce, err = generateState() // Reuse random string gen
+			if len(authState.AuthParams.AppData) > maxAppDataBytes {
+				return h.result(w, r, &AuthResult{
+					ProviderID: providerID,
+					AuthParams: &authState.AuthParams,
+					Error:      endpoint.Error(http.StatusBadRequest, fmt.Sprintf("app_data exceeds maximum length of %d bytes", maxAppDataBytes), nil),
+				})
+			}
+			stateKey, err = generateRandomToken()
 			if err != nil {
 				return h.result(w, r, &AuthResult{
 					ProviderID: providerID,
-					AuthParams: &params.AuthParams,
-					Error:      endpoint.Error(http.StatusInternalServerError, "failed to generate nonce", err),
+					AuthParams: &authState.AuthParams,
+					Error:      endpoint.Error(http.StatusInternalServerError, "failed to generate state", err),
 				})
 			}
-			authState.Nonce = nonce
 		}
 
-		// 5. Store State
-		if err := h.addState(w, r, state, authState); err != nil {
-			return h.result(w, r, &AuthResult{
-				ProviderID: providerID,
-				AuthParams: &params.AuthParams,
-				Error:      endpoint.Error(http.StatusInternalServerError, "failed to save state", err),
-			})
-		}
-
-		// 6. Redirect
-		// Clone config to set RedirectURL
-		conf := *p.config
-		conf.RedirectURL = h.constructCallbackURL(providerID)
-
-		opts := []oauth2.AuthCodeOption{}
-		if p.usePKCE {
-			opts = append(opts, oauth2.SetAuthURLParam("code_challenge", codeChallenge))
-			opts = append(opts, oauth2.SetAuthURLParam("code_challenge_method", "S256"))
-		}
-		if nonce != "" {
-			opts = append(opts, oidc.Nonce(nonce))
-		}
-
-		redirectURL := conf.AuthCodeURL(state, opts...)
-		return &endpoint.RedirectRenderer{URL: redirectURL, Status: http.StatusFound}, nil
+		return h.beginFlow(w, r, providerID, p, stateKey, authState)
 	}, h.processors...))
 
 	h.mux.HandleFunc("GET "+path.Join(basePath, "callback", "{provider}"), endpoint.HandleFunc(func(w http.ResponseWriter, r *http.Request, params CallbackParams) (endpoint.Renderer, error) {
@@ -362,9 +353,78 @@ func (h *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// PrepareAuth stores the provided AuthParams in the secure cookie and returns an opaque
+// stateKey. Pass the stateKey as the state_key query parameter to a login endpoint to
+// resume the flow, e.g. /auth/login/google?state_key=<stateKey>.
+//
+// # Two paths into the login flow
+//
+// There are two ways to initiate an OAuth login:
+//
+// Query-string path — the user (or a link) navigates directly to the login endpoint
+// with next_url and app_data as query parameters:
+//
+//	GET /auth/login/google?next_url=/dashboard&app_data=<encoded>
+//
+// Because these values are user-controlled, the preAuthHook is invoked to validate
+// and re-encode them before they are stored. The default hook rejects open redirects.
+//
+// PrepareAuth path — server-side code constructs AuthParams and calls PrepareAuth
+// before redirecting the user:
+//
+//	stateKey, err := authHandler.PrepareAuth(w, r, AuthParams{NextURL: r.URL.RequestURI()})
+//	// redirect to /auth/login/google?state_key=<stateKey>
+//
+// Because the params originate from trusted server-side code, the preAuthHook is NOT
+// invoked. The caller is responsible for ensuring the params are valid and safe. At
+// minimum, NextURL must be a safe local path — use ValidateNextURLIsLocal if the value
+// derives from user input (e.g. the request URL):
+//
+//	params.NextURL = auth.ValidateNextURLIsLocal(r.URL.RequestURI())
+//
+// AppData must be constructed entirely by the server; never let a user supply raw
+// AppData on the PrepareAuth path.
+//
+// # Why use PrepareAuth
+//
+// Use PrepareAuth when the handler's immediate next action is to redirect the user to
+// a login URL — for example, a protected route that has determined the user is not
+// authenticated and will redirect unconditionally. Each call writes an entry to the
+// secure cookie, so it must not be called speculatively.
+//
+// Use the query-string path when the caller may or may not redirect to login, or when
+// the login link is constructed ahead of time (e.g. a static "Login" button in a page
+// template). In that case, next_url and app_data travel as query parameters and are
+// validated by the preAuthHook when the login endpoint is hit.
+//
+// # Typical flow
+//
+//  1. Protected route detects the user is unauthenticated.
+//  2. Calls PrepareAuth with AuthParams{NextURL: r.URL.RequestURI()}.
+//  3. For a known provider, redirects to the login endpoint:
+//     /auth/login/google?state_key=<stateKey>
+//  4. For a provider chooser, redirects to the app's chooser page:
+//     /app/chooser?state_key=<stateKey>
+//     The chooser page embeds provider-specific login links, each carrying the same
+//     stateKey: /auth/login/google?state_key=<stateKey>, etc.
+//  5. The login endpoint loads the pre-saved AuthParams from the cookie, generates
+//     PKCE/nonce, and redirects the user to the OAuth provider.
+//  6. The OAuth callback verifies PKCE/nonce, and on success the result endpoint
+//     redirects to the saved NextURL.
+func (h *AuthHandler) PrepareAuth(w http.ResponseWriter, r *http.Request, params AuthParams) (string, error) {
+	stateKey, err := generateRandomToken()
+	if err != nil {
+		return "", err
+	}
+	if err := h.addState(w, r, stateKey, AuthState{AuthParams: params}); err != nil {
+		return "", err
+	}
+	return stateKey, nil
+}
+
 // Internal State Management Methods
 
-func (h *AuthHandler) addState(w http.ResponseWriter, r *http.Request, state string, authState AuthState) error {
+func (h *AuthHandler) addState(w http.ResponseWriter, r *http.Request, stateKey string, authState AuthState) error {
 	// Read existing cookie
 	c, _ := r.Cookie(h.cookie.Name())
 	var states AuthStateMap
@@ -405,7 +465,7 @@ func (h *AuthHandler) addState(w http.ResponseWriter, r *http.Request, state str
 
 	// 3. Add new state
 	authState.ExpiresAt = now.Add(authStateTTL)
-	states[state] = authState
+	states[stateKey] = authState
 
 	// Encode and set cookie
 	newCookie, err := h.cookie.Encode(states, int(authStateTTL.Seconds()))
@@ -416,19 +476,13 @@ func (h *AuthHandler) addState(w http.ResponseWriter, r *http.Request, state str
 	return nil
 }
 
-func (h *AuthHandler) popState(w http.ResponseWriter, r *http.Request, state string) (AuthState, error) {
-	c, err := r.Cookie(h.cookie.Name())
+func (h *AuthHandler) popState(w http.ResponseWriter, r *http.Request, stateKey string) (AuthState, error) {
+	states, err := h.loadStates(r)
 	if err != nil {
 		return AuthState{}, err
 	}
 
-	var states AuthStateMap
-	err = h.cookie.Decode(c, &states)
-	if err != nil {
-		return AuthState{}, err
-	}
-
-	authState, ok := states[state]
+	authState, ok := states[stateKey]
 	if !ok {
 		return AuthState{}, errors.New("state not found")
 	}
@@ -436,14 +490,14 @@ func (h *AuthHandler) popState(w http.ResponseWriter, r *http.Request, state str
 	// Check expiry
 	if !authState.ExpiresAt.IsZero() && time.Now().After(authState.ExpiresAt) {
 		// Even if found, it's expired. Remove it and fail.
-		delete(states, state)
+		delete(states, stateKey)
 		// Update cookie (cleanup)
 		h.updateCookie(w, states)
 		return AuthState{}, errors.New("state expired")
 	}
 
 	// Remove the state
-	delete(states, state)
+	delete(states, stateKey)
 
 	// Update the cookie
 	if err := h.updateCookie(w, states); err != nil {
@@ -466,6 +520,103 @@ func (h *AuthHandler) updateCookie(w http.ResponseWriter, states AuthStateMap) e
 	return nil
 }
 
+// loadStates decodes the AuthStateMap from the request's auth cookie.
+// Returns an error if the cookie is absent or cannot be decoded.
+func (h *AuthHandler) loadStates(r *http.Request) (AuthStateMap, error) {
+	c, err := r.Cookie(h.cookie.Name())
+	if err != nil {
+		return nil, err
+	}
+	var states AuthStateMap
+	if err := h.cookie.Decode(c, &states); err != nil {
+		return nil, err
+	}
+	return states, nil
+}
+
+// getState reads an AuthState from the cookie by key without removing it.
+// Returns an error if the cookie is missing, the key is not found, or the state has expired.
+func (h *AuthHandler) getState(r *http.Request, stateKey string) (AuthState, error) {
+	states, err := h.loadStates(r)
+	if err != nil {
+		return AuthState{}, err
+	}
+	authState, ok := states[stateKey]
+	if !ok {
+		return AuthState{}, errors.New("state not found")
+	}
+	if !authState.ExpiresAt.IsZero() && time.Now().After(authState.ExpiresAt) {
+		return AuthState{}, errors.New("state expired")
+	}
+	return authState, nil
+}
+
+// beginFlow completes an OAuth initiation after the auth state and stateKey have been
+// determined. It generates PKCE and nonce values (when required by the provider), stores
+// the completed state in the secure cookie (overwriting any existing entry for stateKey),
+// and returns a redirect to the OAuth provider's authorization endpoint.
+//
+// stateKey is passed as the OAuth "state" parameter. The actual auth state (PKCE verifier,
+// nonce, AuthParams) is stored in the secure cookie keyed by stateKey — it is not encoded
+// into the state value itself.
+func (h *AuthHandler) beginFlow(w http.ResponseWriter, r *http.Request, providerID string, p *Provider, stateKey string, authState AuthState) (endpoint.Renderer, error) {
+	// PKCE
+	var codeChallenge string
+	if p.usePKCE {
+		verifier, challenge, err := generatePKCE()
+		if err != nil {
+			return h.result(w, r, &AuthResult{
+				ProviderID: providerID,
+				AuthParams: &authState.AuthParams,
+				Error:      endpoint.Error(http.StatusInternalServerError, "failed to generate PKCE", err),
+			})
+		}
+		authState.PKCEVerifier = verifier
+		codeChallenge = challenge
+	}
+
+	// OIDC Nonce
+	var nonce string
+	if p.oidcProvider != nil {
+		var err error
+		nonce, err = generateRandomToken()
+		if err != nil {
+			return h.result(w, r, &AuthResult{
+				ProviderID: providerID,
+				AuthParams: &authState.AuthParams,
+				Error:      endpoint.Error(http.StatusInternalServerError, "failed to generate nonce", err),
+			})
+		}
+		authState.Nonce = nonce
+	}
+
+	// Store completed state. If stateKey was created by PrepareAuth, this overwrites the
+	// partial entry (AuthParams only) with the full state (AuthParams + PKCEVerifier + Nonce).
+	if err := h.addState(w, r, stateKey, authState); err != nil {
+		return h.result(w, r, &AuthResult{
+			ProviderID: providerID,
+			AuthParams: &authState.AuthParams,
+			Error:      endpoint.Error(http.StatusInternalServerError, "failed to save state", err),
+		})
+	}
+
+	// Build redirect URL. Clone config to set RedirectURL per-request.
+	conf := *p.config
+	conf.RedirectURL = h.constructCallbackURL(providerID)
+
+	opts := []oauth2.AuthCodeOption{}
+	if p.usePKCE {
+		opts = append(opts, oauth2.SetAuthURLParam("code_challenge", codeChallenge))
+		opts = append(opts, oauth2.SetAuthURLParam("code_challenge_method", "S256"))
+	}
+	if nonce != "" {
+		opts = append(opts, oidc.Nonce(nonce))
+	}
+
+	redirectURL := conf.AuthCodeURL(stateKey, opts...)
+	return &endpoint.RedirectRenderer{URL: redirectURL, Status: http.StatusFound}, nil
+}
+
 func (h *AuthHandler) constructCallbackURL(providerID string) string {
 	u, err := url.Parse(h.publicURL)
 	if err != nil {
@@ -478,6 +629,10 @@ func (h *AuthHandler) constructCallbackURL(providerID string) string {
 
 type LoginParams struct {
 	ProviderID string `path:"provider"`
+	// StateKey is an opaque token created by PrepareAuth. When present, the login handler
+	// loads the pre-saved AuthParams from the secure cookie rather than reading them from
+	// the query string.
+	StateKey string `query:"state_key"`
 	AuthParams
 }
 

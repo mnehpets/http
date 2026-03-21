@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -59,9 +60,17 @@ func GetStableID(token *oidc.IDToken, providerID string) string {
 	return fmt.Sprintf("%s:%s", providerID, token.Subject)
 }
 
+// ValidateNextURLIsLocal returns nextURL if it is a safe local path, or "/" otherwise.
+// A safe local path has no scheme, no host, starts with "/", and contains no literal
+// backslashes. Backslashes are rejected because they are never valid in a URL path
+// (RFC 3986 requires them to be percent-encoded as %5C), and some browsers historically
+// normalised them to "/" enabling protocol-relative redirect attacks.
 func ValidateNextURLIsLocal(nextURL string) string {
-	// Simple check: must be relative (start with /) and not protocol-relative (start with //).
-	if nextURL == "" || !strings.HasPrefix(nextURL, "/") || strings.HasPrefix(nextURL, "//") {
+	if nextURL == "" || strings.ContainsRune(nextURL, '\\') {
+		return "/"
+	}
+	u, err := url.Parse(nextURL)
+	if err != nil || u.Scheme != "" || u.Host != "" || !strings.HasPrefix(u.Path, "/") {
 		return "/"
 	}
 	return nextURL

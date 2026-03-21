@@ -30,9 +30,9 @@ type AuthState struct {
 // and brute-force attacks on the state parameter even with a large number of concurrent flows.
 const stateLength = 32
 
-// generateState creates a random, URL-safe state string.
-// It is used for generating both the OAuth state parameter and the OIDC nonce.
-func generateState() (string, error) {
+// generateRandomToken creates a random, URL-safe token string.
+// It is used for generating both the OAuth state key and the OIDC nonce.
+func generateRandomToken() (string, error) {
 	b := make([]byte, stateLength)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
