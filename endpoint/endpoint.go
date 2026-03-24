@@ -107,22 +107,22 @@ func (f RendererFunc) Render(w http.ResponseWriter, r *http.Request) error {
 // Processor is middleware-style logic that runs before the Renderer.
 //
 // Protocol:
-//   - Processors MUST call next(...), unless they intend to
-//     short-circuit the request.
 //   - Processors MUST NOT call w.WriteHeader(...).
 //   - Processors MUST NOT write to the response body.
+//   - A processor either calls next and returns next's (Renderer, error), or
+//     short-circuits by returning its own (Renderer, error) without calling next.
 //
 // Error handling:
 //   - If any processor returns a non-nil error, the chain stops immediately
 //     and that error is returned to the caller.
 type Processor interface {
-	Process(w http.ResponseWriter, r *http.Request, next func(w http.ResponseWriter, r *http.Request) error) error
+	Process(w http.ResponseWriter, r *http.Request, next func(w http.ResponseWriter, r *http.Request) (Renderer, error)) (Renderer, error)
 }
 
 // ProcessorFunc adapts a function to a Processor.
-type ProcessorFunc func(w http.ResponseWriter, r *http.Request, next func(w http.ResponseWriter, r *http.Request) error) error
+type ProcessorFunc func(w http.ResponseWriter, r *http.Request, next func(w http.ResponseWriter, r *http.Request) (Renderer, error)) (Renderer, error)
 
-func (f ProcessorFunc) Process(w http.ResponseWriter, r *http.Request, next func(w http.ResponseWriter, r *http.Request) error) error {
+func (f ProcessorFunc) Process(w http.ResponseWriter, r *http.Request, next func(w http.ResponseWriter, r *http.Request) (Renderer, error)) (Renderer, error) {
 	return f(w, r, next)
 }
 
@@ -221,58 +221,36 @@ func (h *EndpointHandler[P]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(ctx)
 	}
 
-	// Create a function to recursively call each processor in order, followed by the EndpointFunc.
-	var run func(i int, w2 http.ResponseWriter, r2 *http.Request) error
-	run = func(i int, w2 http.ResponseWriter, r2 *http.Request) error {
-		if i < 0 || i > len(h.Processors) {
-			// Sanity check failure.
-			return errors.New("endpoint: invalid processor index")
-		} else if i < len(h.Processors) {
+	// run calls each processor in order, then the EndpointFunc.
+	// Each level either passes through to the next or short-circuits with its own (Renderer, error).
+	var run func(i int, w2 http.ResponseWriter, r2 *http.Request) (Renderer, error)
+	run = func(i int, w2 http.ResponseWriter, r2 *http.Request) (Renderer, error) {
+		if i < len(h.Processors) {
 			if h.Processors[i] == nil {
-				return errors.New("endpoint: nil processor")
+				return nil, errors.New("endpoint: nil processor")
 			}
-			// Call the i'th processor followed by the next recursion of the "loop".
-			return h.Processors[i].Process(w2, r2, func(w3 http.ResponseWriter, r3 *http.Request) error {
+			return h.Processors[i].Process(w2, r2, func(w3 http.ResponseWriter, r3 *http.Request) (Renderer, error) {
 				return run(i+1, w3, r3)
 			})
 		}
 
-		// All processors have been called; now call EndpointFunc and render response.
-		// Populate params based on request (path, query, form)
-		// according to struct tags on params.
-		//
+		// All processors have been called; now call EndpointFunc.
 		// P must be a struct type, or a pointer to a struct type.
 		// This is enforced by endpoint.Unmarshal (runtime) rather than by the type system.
 		var params P
 		if err := Unmarshal(r2, &params); err != nil {
-			return err
+			return nil, err
 		}
-		renderer, err := h.Endpoint(w2, r2, params)
-		if err != nil {
-			return err
-		}
-		if renderer == nil {
-			return errors.New("endpoint: nil renderer")
-		}
-
-		if c, ok := renderer.(io.Closer); ok {
-			defer c.Close()
-		}
-
-		Commit(r2.Context(), w2)
-		return renderer.Render(w2, r2)
-
+		return h.Endpoint(w2, r2, params)
 	}
 
-	// Start the processor chain.
-	err := run(0, w, r)
+	renderer, err := run(0, w, r)
 
 	if err != nil {
 		status := http.StatusInternalServerError
 		message := ""
 
 		var ee *EndpointError
-		// Check if the error already encodes a valid HTTP status.
 		if errors.As(err, &ee) && ee != nil {
 			if ee.Status >= 100 {
 				status = ee.Status
@@ -288,5 +266,19 @@ func (h *EndpointHandler[P]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Commit(r.Context(), w)
 		http.Error(w, message, status)
 		return
+	}
+
+	if renderer == nil {
+		Commit(r.Context(), w)
+		http.Error(w, "endpoint: nil renderer", http.StatusInternalServerError)
+		return
+	}
+
+	if c, ok := renderer.(io.Closer); ok {
+		defer c.Close()
+	}
+	Commit(r.Context(), w)
+	if err := renderer.Render(w, r); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }

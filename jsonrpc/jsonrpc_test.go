@@ -361,7 +361,7 @@ func TestGenericErrorHidesInternalDetails(t *testing.T) {
 
 func TestProcessorChainExecution(t *testing.T) {
 	executed := false
-	processor := endpoint.ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(w http.ResponseWriter, r *http.Request) error) error {
+	processor := endpoint.ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error)) (endpoint.Renderer, error) {
 		executed = true
 		return next(w, r)
 	})
@@ -385,8 +385,8 @@ func TestProcessorChainExecution(t *testing.T) {
 }
 
 func TestProcessorErrorReturnsHTTPError(t *testing.T) {
-	processor := endpoint.ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(w http.ResponseWriter, r *http.Request) error) error {
-		return endpoint.Error(http.StatusForbidden, "access denied", nil)
+	processor := endpoint.ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error)) (endpoint.Renderer, error) {
+		return nil, endpoint.Error(http.StatusForbidden, "access denied", nil)
 	})
 
 	e := NewEndpoint()
@@ -407,7 +407,7 @@ func TestContextPropagationThroughProcessors(t *testing.T) {
 	ctxKey := struct{}{}
 	var gotValue string
 
-	processor := endpoint.ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(w http.ResponseWriter, r *http.Request) error) error {
+	processor := endpoint.ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error)) (endpoint.Renderer, error) {
 		ctx := context.WithValue(r.Context(), ctxKey, "test-value")
 		return next(w, r.WithContext(ctx))
 	})

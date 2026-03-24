@@ -18,7 +18,7 @@ type headerPreprocessor struct {
 	Value string
 }
 
-func (hp headerPreprocessor) Process(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+func (hp headerPreprocessor) Process(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
 	if hp.Key != "" {
 		w.Header().Set(hp.Key, hp.Value)
 	}
@@ -108,7 +108,7 @@ func TestHandler_Helper_JoinsProcessorAndEndpointFunc_ParamBindingAndCalls(t *te
 	}) (Renderer, error) {
 		// Assert binding and construct body from params.
 		return &StringRenderer{Body: "hello " + strings.ToUpper(params.Name)}, nil
-	}, ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+	}, ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
 		w.Header().Set("X-Processor-Called", "1")
 		return next(w, r)
 	}))
@@ -212,11 +212,8 @@ func TestHandler_MultiplePreprocessors(t *testing.T) {
 		return &StringRenderer{Body: "ok"}, nil
 	},
 		headerPreprocessor{Key: "X-One", Value: "1"},
-		ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+		ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
 			r.Header.Set("X-From-Pre", "yes")
-			if next == nil {
-				return nil
-			}
 			return next(w, r)
 		}),
 		headerPreprocessor{Key: "X-Two", Value: "2"},
@@ -276,7 +273,7 @@ func TestCookies_ProcessorToRenderer_SetCookie(t *testing.T) {
 			http.SetCookie(w, &http.Cookie{Name: "b", Value: "2", Path: "/"})
 		})
 		return &StringRenderer{Body: "ok"}, nil
-	}, ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+	}, ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
 		http.SetCookie(w, &http.Cookie{Name: "a", Value: "1", Path: "/"})
 		return next(w, r)
 	}))
@@ -312,11 +309,11 @@ func TestCookies_ProcessorToProcessor_SetCookie(t *testing.T) {
 	h := Handler(func(_ http.ResponseWriter, r *http.Request, params struct{}) (Renderer, error) {
 		return &StringRenderer{Body: "ok"}, nil
 	},
-		ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+		ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
 			http.SetCookie(w, &http.Cookie{Name: "a", Value: "1", Path: "/"})
 			return next(w, r)
 		}),
-		ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+		ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
 			http.SetCookie(w, &http.Cookie{Name: "b", Value: "2", Path: "/"})
 			return next(w, r)
 		}),
@@ -348,7 +345,7 @@ func TestCookies_LastWriterWins_ByHeaderOrder(t *testing.T) {
 			http.SetCookie(w, &http.Cookie{Name: "a", Value: "defer", Path: "/"})
 		})
 		return &StringRenderer{Body: "ok"}, nil
-	}, ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+	}, ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
 		http.SetCookie(w, &http.Cookie{Name: "a", Value: "processor", Path: "/"})
 		return next(w, r)
 	}))
@@ -377,7 +374,7 @@ func TestCookies_DeferCanDeleteCookie(t *testing.T) {
 			http.SetCookie(w, &http.Cookie{Name: "session", Value: "", Path: "/", MaxAge: -1})
 		})
 		return &NoContentRenderer{Status: http.StatusNoContent}, nil
-	}, ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+	}, ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
 		http.SetCookie(w, &http.Cookie{Name: "session", Value: "abc", Path: "/"})
 		return next(w, r)
 	}))
@@ -464,8 +461,8 @@ func TestHandler_EndpointError_FromProcessor_IsRendered(t *testing.T) {
 
 	h := Handler(func(_ http.ResponseWriter, _ *http.Request, _ struct{}) (Renderer, error) {
 		return &StringRenderer{Body: "ok"}, nil
-	}, ProcessorFunc(func(_ http.ResponseWriter, _ *http.Request, _ func(w http.ResponseWriter, r *http.Request) error) error {
-		return newEndpointError(http.StatusForbidden, "nope", errors.New("forbidden"))
+	}, ProcessorFunc(func(_ http.ResponseWriter, _ *http.Request, _ func(w http.ResponseWriter, r *http.Request) (Renderer, error)) (Renderer, error) {
+		return nil, newEndpointError(http.StatusForbidden, "nope", errors.New("forbidden"))
 	}))
 
 	h.ServeHTTP(rec, req)
@@ -528,8 +525,8 @@ func TestHandler_NonEndpointError_FromProcessor_Is500(t *testing.T) {
 
 	h := Handler(func(_ http.ResponseWriter, _ *http.Request, _ struct{}) (Renderer, error) {
 		return &StringRenderer{Body: "ok"}, nil
-	}, ProcessorFunc(func(_ http.ResponseWriter, _ *http.Request, _ func(w http.ResponseWriter, r *http.Request) error) error {
-		return errors.New("boom")
+	}, ProcessorFunc(func(_ http.ResponseWriter, _ *http.Request, _ func(w http.ResponseWriter, r *http.Request) (Renderer, error)) (Renderer, error) {
+		return nil, errors.New("boom")
 	}))
 
 	h.ServeHTTP(rec, req)
@@ -613,11 +610,11 @@ func TestHandler_EndpointError_FirstErrorWins_StopsPipeline(t *testing.T) {
 		called++
 		return &StringRenderer{Body: "ok"}, nil
 	},
-		ProcessorFunc(func(_ http.ResponseWriter, _ *http.Request, _ func(w http.ResponseWriter, r *http.Request) error) error {
+		ProcessorFunc(func(_ http.ResponseWriter, _ *http.Request, _ func(w http.ResponseWriter, r *http.Request) (Renderer, error)) (Renderer, error) {
 			called++
-			return newEndpointError(http.StatusForbidden, "stop", errors.New("stop"))
+			return nil, newEndpointError(http.StatusForbidden, "stop", errors.New("stop"))
 		}),
-		ProcessorFunc(func(_ http.ResponseWriter, _ *http.Request, next func(w http.ResponseWriter, r *http.Request) error) error {
+		ProcessorFunc(func(_ http.ResponseWriter, _ *http.Request, next func(w http.ResponseWriter, r *http.Request) (Renderer, error)) (Renderer, error) {
 			called++
 			return next(nil, nil)
 		}),
@@ -632,6 +629,43 @@ func TestHandler_EndpointError_FirstErrorWins_StopsPipeline(t *testing.T) {
 	// subsequent processors should not run.
 	if called != 1 {
 		t.Fatalf("expected called == 1, got %d", called)
+	}
+}
+
+func TestHandler_ProcessorShortCircuit_RendererUsed_ChainNotCalled(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	subsequentCalled := false
+	endpointCalled := false
+
+	h := Handler(func(_ http.ResponseWriter, _ *http.Request, _ struct{}) (Renderer, error) {
+		endpointCalled = true
+		return &StringRenderer{Body: "endpoint"}, nil
+	},
+		ProcessorFunc(func(_ http.ResponseWriter, _ *http.Request, _ func(w http.ResponseWriter, r *http.Request) (Renderer, error)) (Renderer, error) {
+			// Short-circuit: return a renderer without calling next.
+			return &StringRenderer{Body: "short-circuit"}, nil
+		}),
+		ProcessorFunc(func(_ http.ResponseWriter, _ *http.Request, next func(w http.ResponseWriter, r *http.Request) (Renderer, error)) (Renderer, error) {
+			subsequentCalled = true
+			return next(nil, nil)
+		}),
+	)
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Result().StatusCode)
+	}
+	if got := rec.Body.String(); got != "short-circuit" {
+		t.Fatalf("expected body %q from short-circuiting processor, got %q", "short-circuit", got)
+	}
+	if subsequentCalled {
+		t.Error("subsequent processor should not have been called after short-circuit")
+	}
+	if endpointCalled {
+		t.Error("endpoint func should not have been called after short-circuit")
 	}
 }
 
@@ -672,7 +706,7 @@ func TestHandler_DecodeParams_FromPathQueryAndForm(t *testing.T) {
 func TestHandler_DeferAndCommit_ExecutionOrder(t *testing.T) {
 	var execOrder []string
 
-	p1 := ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+	p1 := ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
 		Defer(r.Context(), func(w http.ResponseWriter) {
 			execOrder = append(execOrder, "p1-hook")
 			w.Header().Set("X-P1", "val")
@@ -680,7 +714,7 @@ func TestHandler_DeferAndCommit_ExecutionOrder(t *testing.T) {
 		return next(w, r)
 	})
 
-	p2 := ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+	p2 := ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
 		Defer(r.Context(), func(w http.ResponseWriter) {
 			execOrder = append(execOrder, "p2-hook")
 		})
@@ -725,11 +759,11 @@ func TestHandler_DeferAndCommit_ExecutionOrder(t *testing.T) {
 
 func TestHandler_DeferAndCommit_RunOnError(t *testing.T) {
 	hookRan := false
-	p1 := ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+	p1 := ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
 		Defer(r.Context(), func(w http.ResponseWriter) {
 			hookRan = true
 		})
-		return errors.New("processor error")
+		return nil, errors.New("processor error")
 	})
 
 	h := Handler(func(_ http.ResponseWriter, _ *http.Request, _ struct{}) (Renderer, error) {

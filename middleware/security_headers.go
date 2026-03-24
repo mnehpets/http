@@ -228,7 +228,7 @@ func WithCORS(config *CORSConfig) SecurityHeadersOption {
 }
 
 // Process implements endpoint.Processor.
-func (p *SecurityHeadersProcessor) Process(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+func (p *SecurityHeadersProcessor) Process(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (endpoint.Renderer, error)) (endpoint.Renderer, error) {
 	// Set HSTS header
 	if p.HSTS != nil {
 		hsts := formatHSTS(p.HSTS)
@@ -274,11 +274,10 @@ func (p *SecurityHeadersProcessor) Process(w http.ResponseWriter, r *http.Reques
 
 		// Short-circuit CORS Preflight requests.
 		// A preflight request is an OPTIONS request with an Origin and Access-Control-Request-Method.
-		// We can return a 204 No Content response directly.
 		if r.Method == http.MethodOptions &&
 			r.Header.Get("Origin") != "" &&
 			r.Header.Get("Access-Control-Request-Method") != "" {
-			return endpoint.Error(http.StatusNoContent, "", nil)
+			return &endpoint.NoContentRenderer{Status: http.StatusNoContent}, nil
 		}
 	}
 

@@ -418,9 +418,9 @@ func NewSessionProcessor(keyID string, keys map[string][]byte, opts ...SessionPr
 }
 
 // Process implements endpoint.Processor.
-func (p *SessionProcessor[Raw]) Process(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) error) error {
+func (p *SessionProcessor[Raw]) Process(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (endpoint.Renderer, error)) (endpoint.Renderer, error) {
 	if p.cookie == nil {
-		return errors.New("SessionProcessor requires SecureCookie")
+		return nil, errors.New("SessionProcessor requires SecureCookie")
 	}
 
 	// Default to "no session".

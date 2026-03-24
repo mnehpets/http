@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/mnehpets/http/endpoint"
 )
 
 func TestNewSecurityHeadersProcessor(t *testing.T) {
@@ -70,12 +72,12 @@ func TestSecurityHeadersProcessor_DefaultHeaders(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 
 	nextCalled := false
-	next := func(w http.ResponseWriter, r *http.Request) error {
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
 		nextCalled = true
-		return nil
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -141,11 +143,11 @@ func TestSecurityHeadersProcessor_CustomHSTS(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/", nil)
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -167,11 +169,11 @@ func TestSecurityHeadersProcessor_DisableHSTS(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/", nil)
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -186,7 +188,7 @@ func TestSecurityHeadersProcessor_CustomCSP(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/", nil)
 
-	_ = p.Process(w, r, func(w http.ResponseWriter, r *http.Request) error { return nil })
+	p.Process(w, r, func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) { return nil, nil })
 
 	if got := w.Header().Get("Content-Security-Policy"); got != "default-src https:" {
 		t.Errorf("Content-Security-Policy: got %q, want %q", got, "default-src https:")
@@ -198,7 +200,7 @@ func TestSecurityHeadersProcessor_CustomCrossOriginPolicies(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/", nil)
 
-	_ = p.Process(w, r, func(w http.ResponseWriter, r *http.Request) error { return nil })
+	p.Process(w, r, func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) { return nil, nil })
 
 	if got := w.Header().Get("Cross-Origin-Opener-Policy"); got != "unsafe-none" {
 		t.Errorf("COOP: got %q, want %q", got, "unsafe-none")
@@ -216,11 +218,11 @@ func TestSecurityHeadersProcessor_CustomReferrerPolicy(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/", nil)
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -236,11 +238,11 @@ func TestSecurityHeadersProcessor_CustomFrameOptions(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/", nil)
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -256,11 +258,11 @@ func TestSecurityHeadersProcessor_DisableContentTypeOptions(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/", nil)
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -281,11 +283,11 @@ func TestSecurityHeadersProcessor_CORS_SimpleOrigin(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Origin", "https://example.com")
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -316,11 +318,11 @@ func TestSecurityHeadersProcessor_CORS_Wildcard(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Origin", "https://anysite.com")
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -342,11 +344,11 @@ func TestSecurityHeadersProcessor_CORS_WildcardWithCredentials(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Origin", "https://anysite.com")
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -366,11 +368,11 @@ func TestSecurityHeadersProcessor_CORS_UnauthorizedOrigin(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Origin", "https://evil.com")
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -391,11 +393,11 @@ func TestSecurityHeadersProcessor_CORS_NoOriginHeader(t *testing.T) {
 	// Test case with no Origin header to verify CORS headers are not set when
 	// there is no cross-origin request (per CORS spec).
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -417,11 +419,11 @@ func TestSecurityHeadersProcessor_CORS_Credentials(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Origin", "https://example.com")
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -445,20 +447,19 @@ func TestSecurityHeadersProcessor_CORS_PreflightShortCircuit(t *testing.T) {
 	r.Header.Set("Access-Control-Request-Method", "POST")
 
 	nextCalled := false
-	next := func(w http.ResponseWriter, r *http.Request) error {
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
 		nextCalled = true
-		return nil
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	renderer, err := p.Process(w, r, next)
 
-	// Should return a No Content error (short-circuit)
-	if err == nil {
-		t.Fatal("Process should return error for preflight short-circuit")
+	if err != nil {
+		t.Fatalf("Process returned unexpected error for preflight: %v", err)
 	}
-	// Depending on your error implementation, check if it's the expected error status
-	// assuming endpoint.Error wraps status.
-	// For now, checking that next was NOT called is critical.
+	if renderer == nil {
+		t.Fatal("Process should return a renderer for preflight short-circuit")
+	}
 	if nextCalled {
 		t.Error("next should NOT be called for valid CORS preflight")
 	}
@@ -484,12 +485,12 @@ func TestSecurityHeadersProcessor_CORS_NormalOptions_PassThrough(t *testing.T) {
 	// No Access-Control-Request-Method header -> Not a preflight
 
 	nextCalled := false
-	next := func(w http.ResponseWriter, r *http.Request) error {
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
 		nextCalled = true
-		return nil
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -513,11 +514,11 @@ func TestSecurityHeadersProcessor_CORS_ExposedHeaders(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Origin", "https://example.com")
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -546,11 +547,11 @@ func TestSecurityHeadersProcessor_AllHeadersCombined(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Origin", "https://example.com")
 
-	next := func(w http.ResponseWriter, r *http.Request) error {
-		return nil
+	next := func(w http.ResponseWriter, r *http.Request) (endpoint.Renderer, error) {
+		return nil, nil
 	}
 
-	err := p.Process(w, r, next)
+	_, err := p.Process(w, r, next)
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
