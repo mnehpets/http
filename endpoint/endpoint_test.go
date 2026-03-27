@@ -1,7 +1,6 @@
 package endpoint
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	htmltmpl "html/template"
@@ -263,15 +262,13 @@ func TestHandler_NilRenderer_Is500(t *testing.T) {
 	}
 }
 
-func TestCookies_ProcessorToRenderer_SetCookie(t *testing.T) {
+func TestCookies_ProcessorToEndpointFunc_SetCookie(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	h := Handler(func(_ http.ResponseWriter, r *http.Request, params struct{}) (Renderer, error) {
-		// EndpointFunc adds its own cookie via Defer.
-		Defer(r.Context(), func(w http.ResponseWriter) {
-			http.SetCookie(w, &http.Cookie{Name: "b", Value: "2", Path: "/"})
-		})
+	h := Handler(func(w http.ResponseWriter, _ *http.Request, _ struct{}) (Renderer, error) {
+		// EndpointFunc sets its own cookie directly on w.
+		http.SetCookie(w, &http.Cookie{Name: "b", Value: "2", Path: "/"})
 		return &StringRenderer{Body: "ok"}, nil
 	}, ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
 		http.SetCookie(w, &http.Cookie{Name: "a", Value: "1", Path: "/"})
@@ -288,7 +285,6 @@ func TestCookies_ProcessorToRenderer_SetCookie(t *testing.T) {
 		t.Fatalf("expected body %q, got %q", "ok", got)
 	}
 
-	// Set-Cookie is a multi-value header.
 	cookies := resp.Header.Values("Set-Cookie")
 	sort.Strings(cookies)
 	if len(cookies) != 2 {
@@ -299,6 +295,32 @@ func TestCookies_ProcessorToRenderer_SetCookie(t *testing.T) {
 	}
 	if !strings.HasPrefix(cookies[1], "b=2") {
 		t.Fatalf("expected cookie b=2, got %q", cookies[1])
+	}
+}
+
+func TestCookies_LastWriterWins_ByHeaderOrder(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	// Processor sets "a=processor" before calling next.
+	// EndpointFunc sets "a=endpoint" directly — this header comes later, so it wins.
+	h := Handler(func(w http.ResponseWriter, _ *http.Request, _ struct{}) (Renderer, error) {
+		http.SetCookie(w, &http.Cookie{Name: "a", Value: "endpoint", Path: "/"})
+		return &StringRenderer{Body: "ok"}, nil
+	}, ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
+		http.SetCookie(w, &http.Cookie{Name: "a", Value: "processor", Path: "/"})
+		return next(w, r)
+	}))
+
+	h.ServeHTTP(rec, req)
+
+	cookies := rec.Result().Header.Values("Set-Cookie")
+	if len(cookies) < 2 {
+		t.Fatalf("expected at least 2 Set-Cookie headers, got %d: %v", len(cookies), cookies)
+	}
+	last := cookies[len(cookies)-1]
+	if !strings.HasPrefix(last, "a=endpoint") {
+		t.Fatalf("expected last Set-Cookie to be endpoint's, got %q (all: %v)", last, cookies)
 	}
 }
 
@@ -332,72 +354,6 @@ func TestCookies_ProcessorToProcessor_SetCookie(t *testing.T) {
 	}
 	if !strings.HasPrefix(cookies[1], "b=2") {
 		t.Fatalf("expected cookie b=2, got %q", cookies[1])
-	}
-}
-
-func TestCookies_LastWriterWins_ByHeaderOrder(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-
-	h := Handler(func(_ http.ResponseWriter, r *http.Request, params struct{}) (Renderer, error) {
-		Defer(r.Context(), func(w http.ResponseWriter) {
-			// Defer sets same cookie name as processor.
-			http.SetCookie(w, &http.Cookie{Name: "a", Value: "defer", Path: "/"})
-		})
-		return &StringRenderer{Body: "ok"}, nil
-	}, ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
-		http.SetCookie(w, &http.Cookie{Name: "a", Value: "processor", Path: "/"})
-		return next(w, r)
-	}))
-
-	h.ServeHTTP(rec, req)
-
-	resp := rec.Result()
-	cookies := resp.Header.Values("Set-Cookie")
-	if len(cookies) < 2 {
-		t.Fatalf("expected at least 2 Set-Cookie headers, got %d: %v", len(cookies), cookies)
-	}
-	// In approach (1), we cannot de-duplicate: both cookies exist. The browser
-	// effectively applies the last matching Set-Cookie.
-	last := cookies[len(cookies)-1]
-	if !strings.HasPrefix(last, "a=defer") {
-		t.Fatalf("expected last Set-Cookie to be defer's, got %q (all: %v)", last, cookies)
-	}
-}
-
-func TestCookies_DeferCanDeleteCookie(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-
-	h := Handler(func(_ http.ResponseWriter, r *http.Request, params struct{}) (Renderer, error) {
-		Defer(r.Context(), func(w http.ResponseWriter) {
-			http.SetCookie(w, &http.Cookie{Name: "session", Value: "", Path: "/", MaxAge: -1})
-		})
-		return &NoContentRenderer{Status: http.StatusNoContent}, nil
-	}, ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
-		http.SetCookie(w, &http.Cookie{Name: "session", Value: "abc", Path: "/"})
-		return next(w, r)
-	}))
-
-	h.ServeHTTP(rec, req)
-
-	resp := rec.Result()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("expected status %d, got %d", http.StatusNoContent, resp.StatusCode)
-	}
-
-	cookies := resp.Header.Values("Set-Cookie")
-	if len(cookies) < 2 {
-		t.Fatalf("expected at least 2 Set-Cookie headers, got %d: %v", len(cookies), cookies)
-	}
-	last := cookies[len(cookies)-1]
-	if !strings.HasPrefix(last, "session=") {
-		t.Fatalf("expected last Set-Cookie to reference session cookie, got %q", last)
-	}
-	// Deletion semantics are encoded in attributes. We assert that Max-Age=0 or
-	// Max-Age=-1 depending on encoding; net/http uses Max-Age=0 for MaxAge<0.
-	if !strings.Contains(strings.ToLower(last), "max-age=0") && !strings.Contains(strings.ToLower(last), "max-age=-1") {
-		t.Fatalf("expected deletion cookie to include Max-Age attr, got %q", last)
 	}
 }
 
@@ -701,96 +657,6 @@ func TestHandler_DecodeParams_FromPathQueryAndForm(t *testing.T) {
 	if got := rec.Body.String(); got != "id=42 rest=extra/path q=abc n=7 b=hi auto=z f=hello limit=0 score=1.25" {
 		t.Fatalf("expected body %q, got %q", "id=42 rest=extra/path q=abc n=7 b=hi auto=z f=hello limit=0 score=1.25", got)
 	}
-}
-
-func TestHandler_DeferAndCommit_ExecutionOrder(t *testing.T) {
-	var execOrder []string
-
-	p1 := ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
-		Defer(r.Context(), func(w http.ResponseWriter) {
-			execOrder = append(execOrder, "p1-hook")
-			w.Header().Set("X-P1", "val")
-		})
-		return next(w, r)
-	})
-
-	p2 := ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
-		Defer(r.Context(), func(w http.ResponseWriter) {
-			execOrder = append(execOrder, "p2-hook")
-		})
-		return next(w, r)
-	})
-
-	h := Handler(func(_ http.ResponseWriter, _ *http.Request, _ struct{}) (Renderer, error) {
-		return RendererFunc(func(w http.ResponseWriter, r *http.Request) error {
-			execOrder = append(execOrder, "renderer")
-			w.WriteHeader(http.StatusOK)
-			return nil
-		}), nil
-	}, p1, p2)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	h.ServeHTTP(rec, req)
-
-	// Expected order:
-	// 1. Commit runs hooks LIFO (p2 registered last -> p2-hook, then p1-hook)
-	// 2. Renderer runs
-	// Wait. Commit runs BEFORE Render.
-	// So hooks run first.
-
-	if len(execOrder) != 3 {
-		t.Fatalf("execOrder length: got %d want 3 (%v)", len(execOrder), execOrder)
-	}
-	if execOrder[0] != "p2-hook" {
-		t.Errorf("expected p2-hook first, got %s", execOrder[0])
-	}
-	if execOrder[1] != "p1-hook" {
-		t.Errorf("expected p1-hook second, got %s", execOrder[1])
-	}
-	if execOrder[2] != "renderer" {
-		t.Errorf("expected renderer last, got %s", execOrder[2])
-	}
-
-	if rec.Header().Get("X-P1") != "val" {
-		t.Errorf("X-P1 header not set by hook")
-	}
-}
-
-func TestHandler_DeferAndCommit_RunOnError(t *testing.T) {
-	hookRan := false
-	p1 := ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (Renderer, error)) (Renderer, error) {
-		Defer(r.Context(), func(w http.ResponseWriter) {
-			hookRan = true
-		})
-		return nil, errors.New("processor error")
-	})
-
-	h := Handler(func(_ http.ResponseWriter, _ *http.Request, _ struct{}) (Renderer, error) {
-		return &StringRenderer{Body: "ok"}, nil
-	}, p1)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("expected status 500, got %d", rec.Code)
-	}
-	if !hookRan {
-		t.Errorf("expected deferred hook to run on error")
-	}
-}
-
-func TestHandler_Defer_NoOpWithoutContext(t *testing.T) {
-	// Calling Defer with background context should not panic and do nothing.
-	defer func() {
-		if r := recover(); r != nil {
-			t.Errorf("Defer panicked: %v", r)
-		}
-	}()
-	// No hooks initialized in Background context.
-	Defer(context.Background(), func(w http.ResponseWriter) {})
 }
 
 type closingRenderer struct {

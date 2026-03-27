@@ -23,9 +23,10 @@ func (m *mockSession) Username() (string, bool)       { return m.username, m.log
 func (m *mockSession) Login(username string) error    { m.username = username; m.loggedIn = true; return nil }
 func (m *mockSession) Logout() error                  { m.username = ""; m.loggedIn = false; return nil }
 func (m *mockSession) Expires() time.Time             { return time.Time{} }
-func (m *mockSession) Get(key string, dest any) error { return nil }
-func (m *mockSession) Set(key string, value any) error { return nil }
-func (m *mockSession) Delete(key string)              {}
+func (m *mockSession) Get(key string, dest any) error          { return nil }
+func (m *mockSession) Set(key string, value any) error         { return nil }
+func (m *mockSession) Delete(key string)                       {}
+func (m *mockSession) MaybeSetCookie(w http.ResponseWriter) {}
 
 // injectSession wraps h, placing sess into the request context before serving.
 func injectSession(h http.Handler, sess middleware.Session) http.Handler {

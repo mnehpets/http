@@ -26,7 +26,6 @@
 package endpoint
 
 import (
-	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -167,39 +166,6 @@ func Handler[P any](fn EndpointFunc[P], processors ...Processor) *EndpointHandle
 	}
 }
 
-type hooksKey struct{}
-
-// Defer registers a function to be called before the response headers are written.
-// The function fn must not call WriteHeader itself.
-//
-// WARNING: If the context does not contain a hooks registry (e.g. not running within
-// an EndpointHandler), this function is a silent no-op. This is a potential hazard
-// as middleware relying on Defer (like sessions) will fail to save state without error.
-func Defer(ctx context.Context, fn func(http.ResponseWriter)) {
-	hooks, ok := ctx.Value(hooksKey{}).(*[]func(http.ResponseWriter))
-	if ok && hooks != nil {
-		*hooks = append(*hooks, fn)
-	}
-}
-
-// Commit executes all deferred functions registered via Defer.
-// It should be called exactly once before writing headers.
-//
-// WARNING: If the context does not contain a hooks registry (e.g. not running within
-// an EndpointHandler), this function is a silent no-op. This is a potential hazard
-// as deferred operations will not run.
-func Commit(ctx context.Context, w http.ResponseWriter) {
-	hooks, ok := ctx.Value(hooksKey{}).(*[]func(http.ResponseWriter))
-	if ok && hooks != nil {
-		// Run in LIFO order
-		for i := len(*hooks) - 1; i >= 0; i-- {
-			(*hooks)[i](w)
-		}
-		// Clear hooks to prevent re-execution
-		*hooks = nil
-	}
-}
-
 // HandleFunc adapts an EndpointFunc into an http.HandlerFunc.
 //
 // This helper exists to enable type inference for the params type P.
@@ -212,13 +178,6 @@ func (h *EndpointHandler[P]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.Endpoint == nil {
 		http.Error(w, "endpoint: nil EndpointFunc", http.StatusInternalServerError)
 		return
-	}
-
-	// Initialize hooks context if not present
-	if r.Context().Value(hooksKey{}) == nil {
-		var hooks []func(http.ResponseWriter)
-		ctx := context.WithValue(r.Context(), hooksKey{}, &hooks)
-		r = r.WithContext(ctx)
 	}
 
 	// run calls each processor in order, then the EndpointFunc.
@@ -263,13 +222,11 @@ func (h *EndpointHandler[P]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			message = err.Error()
 		}
-		Commit(r.Context(), w)
 		http.Error(w, message, status)
 		return
 	}
 
 	if renderer == nil {
-		Commit(r.Context(), w)
 		http.Error(w, "endpoint: nil renderer", http.StatusInternalServerError)
 		return
 	}
@@ -277,7 +234,6 @@ func (h *EndpointHandler[P]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if c, ok := renderer.(io.Closer); ok {
 		defer c.Close()
 	}
-	Commit(r.Context(), w)
 	if err := renderer.Render(w, r); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}

@@ -68,6 +68,10 @@ type Session interface {
 	// Delete removes the value associated with key from the session.
 	// This is a no-op if the key does not exist or the user is not logged in.
 	Delete(key string)
+	// MaybeSetCookie writes a Set-Cookie header to w if the session has been
+	// mutated since it was loaded. It is called by SessionProcessor after next()
+	// returns. External implementations should leave this as a no-op.
+	MaybeSetCookie(w http.ResponseWriter)
 }
 
 // sessionData[Raw] is the serializable session state.
@@ -93,12 +97,39 @@ type sessionData[Raw ByteSlice] struct {
 // and with a dirty flag to track modification.
 type session[Raw ByteSlice] struct {
 	sessionData *sessionData[Raw]
+	// cookie is used to encode/clear the session cookie.
+	cookie SecureCookie
 	// marshal encodes a user-supplied value into a Raw value.
 	marshal func(any) ([]byte, error)
 	// unmarshal decodes a Raw value into a user-supplied value.
 	unmarshal func([]byte, any) error
 	// dirty indicates whether the session data has been modified.
 	dirty bool
+}
+
+func (s *session[Raw]) MaybeSetCookie(w http.ResponseWriter) {
+	if s == nil || s.cookie == nil {
+		return
+	}
+	if s.sessionData == nil {
+		if s.dirty {
+			http.SetCookie(w, s.cookie.Clear())
+			s.dirty = false
+		}
+		return
+	}
+	maxAge := int(time.Until(s.sessionData.Expires).Seconds())
+	if maxAge <= 0 {
+		http.SetCookie(w, s.cookie.Clear())
+		s.dirty = false
+		return
+	}
+	if s.dirty {
+		if c, err := s.cookie.Encode(*s.sessionData, maxAge); err == nil {
+			http.SetCookie(w, c)
+			s.dirty = false
+		}
+	}
 }
 
 func (s *session[Raw]) ID() string {
@@ -423,87 +454,68 @@ func (p *SessionProcessor[Raw]) Process(w http.ResponseWriter, r *http.Request, 
 		return nil, errors.New("SessionProcessor requires SecureCookie")
 	}
 
-	// Default to "no session".
-	sess := &session[Raw]{
-		sessionData: nil,
-		marshal:     p.marshal,
-		unmarshal:   p.unmarshal,
-		dirty:       false,
-	}
+	var sess Session
 
-	// Try to read existing session
-	c, err := r.Cookie(p.cookie.Name())
-	if err == nil {
-		// We have a cookie, try to decode it.
-		var sessData sessionData[Raw]
-		err = p.cookie.Decode(c, &sessData)
+	// If a session is already present in context (installed by an outer SessionProcessor),
+	// reuse it instead of trying to load from cookie again. This allows multiple SessionProcessors
+	// to share the same session state.
+	if existing, ok := SessionFromContext(r.Context()); ok {
+		sess = existing
+	} else {
+		// Default to "no session" if no valid session cookie is found.
+		sess0 := &session[Raw]{
+			sessionData: nil,
+			cookie:      p.cookie,
+			marshal:     p.marshal,
+			unmarshal:   p.unmarshal,
+			dirty:       false,
+		}
+
+		// Try to read existing session
+		c, err := r.Cookie(p.cookie.Name())
 		if err == nil {
-			// Make sure KV is initialized so downstream code can safely write to it.
-			if sessData.KV == nil {
-				sessData.KV = map[string]Raw{}
-			}
+			// We have a cookie, try to decode it.
+			var sessData sessionData[Raw]
+			err = p.cookie.Decode(c, &sessData)
+			if err == nil {
+				// Make sure KV is initialized so downstream code can safely write to it.
+				if sessData.KV == nil {
+					sessData.KV = map[string]Raw{}
+				}
 
-			maxAge := p.MaxAge
-			if maxAge <= 0 {
-				maxAge = DefaultSessionPeriod
-			}
-			extendThreshold := p.ExtendThreshold
-			if extendThreshold <= 0 {
-				extendThreshold = DefaultSessionRevalidationExtendThreshold
-			}
+				maxAge := p.MaxAge
+				if maxAge <= 0 {
+					maxAge = DefaultSessionPeriod
+				}
+				extendThreshold := p.ExtendThreshold
+				if extendThreshold <= 0 {
+					extendThreshold = DefaultSessionRevalidationExtendThreshold
+				}
 
-			ok, extended := sessData.validate(extendThreshold, maxAge)
-			if !ok {
-				// Invalid or expired. Clear it.
-				// We can't clear it immediately in the response here because we might not have written headers yet,
-				// but we also shouldn't write Set-Cookie header yet as we are a processor.
-				// We rely on the deferred function to clear it if sess.sessionData[Raw] is nil.
-				sess.dirty = true
+				ok, extended := sessData.validate(extendThreshold, maxAge)
+				if !ok {
+					// Invalid or expired. Clear it.
+					// We can't clear it immediately in the response here because we might not have written headers yet,
+					// but we also shouldn't write Set-Cookie header yet as we are a processor.
+					// We rely on the deferred function to clear it if sess.sessionData[Raw] is nil.
+					sess0.dirty = true
+				} else {
+					sess0.sessionData = &sessData
+					sess0.dirty = extended
+				}
 			} else {
-				sess.sessionData = &sessData
-				sess.dirty = extended
+				// Failed to decode (tampered, invalid format, etc). Clear it.
+				sess0.dirty = true
 			}
-		} else {
-			// Failed to decode (tampered, invalid format, etc). Clear it.
-			sess.dirty = true
 		}
+
+		*r = *r.WithContext(WithSession(r.Context(), sess0))
+		sess = sess0
 	}
 
-	// Just before headers are written, check for dirty, and persist any changes.
-	endpoint.Defer(r.Context(), func(w http.ResponseWriter) {
-		p.maybeSetCookie(w, sess)
-	})
-
-	*r = *r.WithContext(WithSession(r.Context(), sess))
-	return next(w, r)
-}
-
-func (p *SessionProcessor[Raw]) maybeSetCookie(w http.ResponseWriter, sess *session[Raw]) {
-	if sess == nil {
-		return
-	}
-	if sess.sessionData == nil {
-		if sess.dirty {
-			c := p.cookie.Clear()
-			http.SetCookie(w, c)
-		}
-		return
-	}
-
-	maxAge := int(time.Until(sess.sessionData.Expires).Seconds())
-	if maxAge <= 0 {
-		c := p.cookie.Clear()
-		http.SetCookie(w, c)
-		return
-	}
-
-	if sess.dirty {
-		c, err := p.cookie.Encode(*sess.sessionData, maxAge)
-		if err == nil {
-			http.SetCookie(w, c)
-		}
-		return
-	}
+	renderer, err := next(w, r)
+	sess.MaybeSetCookie(w)
+	return renderer, err
 }
 
 var _ endpoint.Processor = (*SessionProcessor[cbor.RawMessage])(nil)

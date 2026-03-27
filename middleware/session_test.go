@@ -777,3 +777,150 @@ func TestNewSessionProcessor_WithCustomOptions(t *testing.T) {
 		t.Fatalf("custom unmarshal not called")
 	}
 }
+
+// TestSessionProcessor_NestedHandlers verifies that when an inner endpoint.Handler
+// (with its own SessionProcessor) is called from a renderer that was returned by an
+// outer endpoint.Handler (also with a SessionProcessor), the inner processor:
+//   - reuses the session already in context (does not re-read the cookie),
+//   - writes a Set-Cookie if the inner handler mutates the session.
+//
+// The test uses two mutations: the outer handler calls Login(), and the renderer
+// (which calls the inner handler) observes the logged-in state and calls Set().
+// This confirms session state is shared between outer and inner, and that the
+// final cookie reflects both mutations.
+func TestSessionProcessor_NestedHandlers(t *testing.T) {
+	// Both inner and outer share the same processor (same key, same cookie name).
+	p, sc := newTestSessionProcessor(t, WithMaxAge(time.Hour), WithExtendThreshold(time.Second))
+
+	// Inner handler: verifies the session is already logged in (by the outer), then
+	// stores a KV value.
+	innerH := endpoint.Handler(func(_ http.ResponseWriter, r *http.Request, _ struct{}) (endpoint.Renderer, error) {
+		sess, ok := SessionFromContext(r.Context())
+		if !ok {
+			t.Fatalf("inner: no session in context")
+		}
+		if u, loggedIn := sess.Username(); !loggedIn || u != "outer-user" {
+			t.Fatalf("inner: expected session logged in as %q, got (%q,%v)", "outer-user", u, loggedIn)
+		}
+		if err := sess.Set("role", "admin"); err != nil {
+			t.Fatalf("inner: Set: %v", err)
+		}
+		return &endpoint.NoContentRenderer{}, nil
+	}, p)
+
+	// Outer handler: calls Login(), then returns a renderer that delegates to the inner handler.
+	outerH := endpoint.Handler(func(_ http.ResponseWriter, r *http.Request, _ struct{}) (endpoint.Renderer, error) {
+		sess, ok := SessionFromContext(r.Context())
+		if !ok {
+			t.Fatalf("outer: no session in context")
+		}
+		if err := sess.Login("outer-user"); err != nil {
+			t.Fatalf("outer: Login: %v", err)
+		}
+		return endpoint.RendererFunc(func(w http.ResponseWriter, r *http.Request) error {
+			innerH.ServeHTTP(w, r)
+			return nil
+		}), nil
+	}, p)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	outerH.ServeHTTP(w, r)
+
+	cookies := w.Result().Cookies()
+	// The outer processor's MaybeSetCookie fires after the outer endpoint func returns
+	// (before the renderer runs). Login() has already been called → one Set-Cookie.
+	// The renderer then calls the inner handler; the inner processor (pass-through)
+	// calls MaybeSetCookie after Set() marks dirty → a second Set-Cookie.
+	if len(cookies) != 2 {
+		t.Fatalf("Set-Cookie count: got %d want 2", len(cookies))
+	}
+	for i, c := range cookies {
+		if c.Name != "OSS" {
+			t.Fatalf("cookies[%d].Name: got %q want %q", i, c.Name, "OSS")
+		}
+	}
+
+	// The second cookie (after Set) must decode with both the username and KV entry.
+	var decoded sessionData[cbor.RawMessage]
+	if err := sc.Decode(cookies[1], &decoded); err != nil {
+		t.Fatalf("Decode(second cookie): %v", err)
+	}
+	if decoded.Username != "outer-user" {
+		t.Fatalf("second cookie username: got %q want %q", decoded.Username, "outer-user")
+	}
+	if decoded.KV == nil {
+		t.Fatalf("second cookie KV is nil")
+	}
+	var role string
+	if err := cbor.Unmarshal([]byte(decoded.KV["role"]), &role); err != nil {
+		t.Fatalf("unmarshal KV[role]: %v", err)
+	}
+	if role != "admin" {
+		t.Fatalf("KV[role]: got %q want %q", role, "admin")
+	}
+}
+
+// TestSessionProcessor_TwoProcessorsInChain verifies that when two SessionProcessors
+// appear in the processor chain of a single endpoint.Handler, only the first one
+// loads the session from the cookie (p2 acts as pass-through), both share the same
+// session object, and exactly one Set-Cookie is written (dirty is cleared on first write).
+func TestSessionProcessor_TwoProcessorsInChain(t *testing.T) {
+	p1, sc := newTestSessionProcessor(t, WithMaxAge(time.Hour), WithExtendThreshold(time.Second))
+	p2, _ := newTestSessionProcessor(t, WithMaxAge(time.Hour), WithExtendThreshold(time.Second))
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	var p1Sess, p2Sess Session
+
+	// Capture the session as seen by each processor using a ProcessorFunc wrapper.
+	capturingP1 := endpoint.ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (endpoint.Renderer, error)) (endpoint.Renderer, error) {
+		renderer, err := p1.Process(w, r, next)
+		p1Sess, _ = SessionFromContext(r.Context())
+		return renderer, err
+	})
+	capturingP2 := endpoint.ProcessorFunc(func(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request) (endpoint.Renderer, error)) (endpoint.Renderer, error) {
+		renderer, err := p2.Process(w, r, next)
+		p2Sess, _ = SessionFromContext(r.Context())
+		return renderer, err
+	})
+
+	h := endpoint.Handler(func(_ http.ResponseWriter, r *http.Request, _ struct{}) (endpoint.Renderer, error) {
+		sess, ok := SessionFromContext(r.Context())
+		if !ok {
+			t.Fatalf("no session in context")
+		}
+		if err := sess.Login("chain-user"); err != nil {
+			t.Fatalf("Login: %v", err)
+		}
+		return &endpoint.NoContentRenderer{}, nil
+	}, capturingP1, capturingP2)
+
+	h.ServeHTTP(w, r)
+
+	// Both processors must have seen the same session pointer.
+	if p1Sess == nil || p2Sess == nil {
+		t.Fatalf("session not captured: p1=%v p2=%v", p1Sess, p2Sess)
+	}
+	if p1Sess != p2Sess {
+		t.Fatalf("p1 and p2 hold different session pointers: p1=%p p2=%p", p1Sess, p2Sess)
+	}
+
+	// p2 unwinds first, writes Set-Cookie and clears dirty.
+	// p1 unwinds second, sees dirty=false → no write.
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("Set-Cookie count: got %d want 1", len(cookies))
+	}
+	if cookies[0].Name != "OSS" {
+		t.Fatalf("cookies[0].Name: got %q want %q", cookies[0].Name, "OSS")
+	}
+	var decoded sessionData[cbor.RawMessage]
+	if err := sc.Decode(cookies[0], &decoded); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if decoded.Username != "chain-user" {
+		t.Fatalf("username: got %q want %q", decoded.Username, "chain-user")
+	}
+}
