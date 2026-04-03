@@ -374,9 +374,9 @@ func TestFileSystemEndpoint_DirectoryWithoutIndexOrListingIs404(t *testing.T) {
 
 func TestFileSystemEndpoint_FileRendererHook_ReturnsRenderer(t *testing.T) {
 	called := false
-	hook := FileRendererHook(func(urlPath string, f fs.File) (Renderer, error) {
+	hook := FileRendererHook(func(filePath string, fsys fs.FS, f fs.File) (Renderer, error) {
 		called = true
-		if urlPath != "/hello.txt" {
+		if filePath != "hello.txt" {
 			return nil, nil
 		}
 		_ = f // hook takes ownership
@@ -411,7 +411,7 @@ func TestFileSystemEndpoint_FileRendererHook_ReturnsRenderer(t *testing.T) {
 }
 
 func TestFileSystemEndpoint_FileRendererHook_NilFallsThrough(t *testing.T) {
-	hook := FileRendererHook(func(urlPath string, f fs.File) (Renderer, error) {
+	hook := FileRendererHook(func(filePath string, fsys fs.FS, f fs.File) (Renderer, error) {
 		return nil, nil // not handled — fall through to default
 	})
 
@@ -466,9 +466,9 @@ func TestFileSystemEndpoint_FileRendererHook_Omitted_DefaultBehaviour(t *testing
 
 func TestFileSystemEndpoint_DirRendererHook_ReturnsRenderer(t *testing.T) {
 	called := false
-	hook := FileRendererHook(func(urlPath string, f fs.File) (Renderer, error) {
+	hook := FileRendererHook(func(filePath string, fsys fs.FS, f fs.File) (Renderer, error) {
 		called = true
-		if urlPath != "/blog/" {
+		if filePath != "blog" {
 			return nil, nil
 		}
 		return &StringRenderer{Body: "blog index"}, nil
@@ -502,7 +502,7 @@ func TestFileSystemEndpoint_DirRendererHook_ReturnsRenderer(t *testing.T) {
 }
 
 func TestFileSystemEndpoint_DirRendererHook_NilFallsThrough(t *testing.T) {
-	hook := FileRendererHook(func(urlPath string, f fs.File) (Renderer, error) {
+	hook := FileRendererHook(func(filePath string, fsys fs.FS, f fs.File) (Renderer, error) {
 		return nil, nil // not handled
 	})
 

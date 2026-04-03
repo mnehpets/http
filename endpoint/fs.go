@@ -182,7 +182,8 @@ func FormatSize(size int64) string {
 }
 
 // FileRendererHook is called by FileSystem when a file or directory is opened.
-// It receives the request URL path and the open fs.File.
+// It receives the path relative to the route (the same path used to open the
+// file in the fs.FS), the fs.FS itself, and the open fs.File.
 //
 // Ownership rules:
 //   - If a non-nil Renderer is returned, ownership of the file transfers to
@@ -190,7 +191,7 @@ func FormatSize(size int64) string {
 //   - If nil, nil is returned, ownership remains with FileSystem, which will
 //     continue with its default handling. The hook MUST NOT have called Read
 //     or ReadDir on the file; Stat is safe.
-type FileRendererHook func(urlPath string, f fs.File) (Renderer, error)
+type FileRendererHook func(filePath string, fsys fs.FS, f fs.File) (Renderer, error)
 
 // FileSystemParams are the decoded request params for FileSystem.
 //
@@ -307,11 +308,7 @@ func (f *FileSystem) Endpoint(w http.ResponseWriter, r *http.Request, params Fil
 		// The hook receives the open directory file; it MUST NOT call ReadDir
 		// if it returns nil, nil.
 		if f.DirRenderer != nil {
-			urlPath := ""
-			if r.URL != nil {
-				urlPath = r.URL.Path
-			}
-			renderer, err := f.DirRenderer(urlPath, file)
+			renderer, err := f.DirRenderer(p, fsys, file)
 			if err != nil {
 				_ = file.Close()
 				return nil, err
@@ -356,11 +353,7 @@ func (f *FileSystem) Endpoint(w http.ResponseWriter, r *http.Request, params Fil
 	// FileRenderer hook: called before default static file serving.
 	// The hook receives the open file; it MUST NOT call Read if it returns nil, nil.
 	if f.FileRenderer != nil {
-		urlPath := ""
-		if r.URL != nil {
-			urlPath = r.URL.Path
-		}
-		renderer, err := f.FileRenderer(urlPath, file)
+		renderer, err := f.FileRenderer(p, fsys, file)
 		if err != nil {
 			_ = file.Close()
 			return nil, err
